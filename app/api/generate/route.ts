@@ -84,6 +84,9 @@ Strict rules:
 2. The very first non-empty line of the output MUST be the valid Mermaid diagram declaration for the requested diagram type.
 3. Every node ID must strictly match [a-zA-Z][a-zA-Z0-9_]*.
 4. Ensure all syntax elements are fully compliant with Mermaid v10 definitions.
+5. CRITICAL STATEMENT SPACING RULE:
+   Each statement, keyword, boundary block start/end, relationship, title, and direction declaration MUST be on its own separate newline.
+   You must NEVER combine or squash multiple statements onto a single line (for example, NEVER write "title Platformdirection TD" or "direction TDPerson(...)").
 
 GUIDELINES BY KIND:
 - flowchart:
@@ -109,6 +112,17 @@ GUIDELINES BY KIND:
     classDef process  fill:#1a2035,stroke:#5b8df8,color:#e4eaf8,stroke-width:1px;
   Assign classes like "class nodeId service".
 
+  CORRECT SPACING EXAMPLE (flowchart):
+  %%{init: {"theme": "dark", "flowchart": {"curve": "stepBefore"}}}%%
+  flowchart TD
+  subgraph group_web ["Web Layer"]
+      web_client["🖥️ Web Client"]
+  end
+  subgraph group_api ["API Layer"]
+      api_gateway["🚀 API Gateway"]
+  end
+  web_client --> api_gateway
+
 - sequence:
   Start with "sequenceDiagram"
   Declare participants: "participant alias as \\"Name\\"" or "actor alias as \\"Name\\""
@@ -132,7 +146,30 @@ GUIDELINES BY KIND:
   C4Context: title, Person(alias, "Label", "Description"), System(alias, "Label", "Description"), System_Ext(alias, "Label", "Description"), Rel(from, to, "Label").
   C4Container: System_Boundary(alias, "Boundary Label") { Container(alias, "Label", "Technology", "Description") }, Person, ContainerDb.
   C4Component: Container_Boundary(alias, "Boundary Label") { Component(alias, "Label", "Technology", "Description") }.
-  Ensure you include "LAYOUT_WITH_LEGEND()".
+  IMPORTANT STRICT RULES FOR MERMAID:
+  1. Each component declaration, boundary block, relationship (Rel), the title, and the direction declaration MUST be written on its own separate new line. Do NOT combine statements on the same line.
+  2. Quote all node labels that contain spaces, special characters, or reserved words — use double quotes: A["My Label"]
+  3. Never use TD, LR, TB, BT, RL as part of a node ID or label — these are reserved Mermaid direction keywords. Rename any node whose ID or label contains these strings.
+  4. Avoid underscores in node IDs if they appear adjacent to reserved keywords — use camelCase or hyphens instead (e.g., systemCore instead of System_TD).
+  5. Validate the output mentally by checking that every line is either a valid declaration, node definition, or edge — nothing else.
+  6. The graph type and direction must always be on their own dedicated first line — e.g. "flowchart LR" alone, nothing else on that line.
+  7. Every "subgraph" keyword must start on a new line, never immediately following the direction declaration or any other statement.
+  8. Every "end" keyword must be on its own line to close each subgraph block.
+  9. Each node definition, edge, and directive must occupy its own line — never concatenate two statements on a single line.
+  10. Use consistent 2 or 4 space indentation inside subgraph blocks for readability.
+  11. Output the diagram as a properly newline-separated string — every statement on its own line, no exceptions. Do NOT use string concatenation or template literals that could collapse whitespace — emit the diagram as a raw multiline string.
+  12. After generating, mentally re-parse each line and confirm no two statements share a line before returning.
+  13. Return only the raw Mermaid code — no markdown fences (no \`\`\`mermaid), no explanation, no preamble.
+  Ensure you include "LAYOUT_WITH_LEGEND()" on a separate new line at the very end of the diagram.
+
+  CORRECT SPACING EXAMPLE (c4context):
+  C4Context
+  title Online Banking System
+  direction TD
+  Person(customer, "Banking Customer", "A customer of the bank")
+  System(banking_system, "Internet Banking System", "Allows customers to view account info")
+  Rel(customer, banking_system, "Uses")
+  LAYOUT_WITH_LEGEND()
 
 - gantt:
   Start with "gantt"
@@ -206,6 +243,147 @@ function sanitizeContent(text: string): string {
   clean = clean.replace(/^```[a-zA-Z-]*\n/gm, "");
   clean = clean.replace(/\n```$/gm, "");
   clean = clean.replace(/^```$/gm, "");
+
+  // Normalize line endings
+  clean = clean.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  // ── Category 1: Diagram-type declarations ────────────────────────────────
+  // Standalone keywords with NO parentheses that may be squashed directly
+  // against another word character (e.g. "C4Contexttitle", "erDiagramtitle").
+  // MUST NOT use \b because the preceding char may also be a word char.
+  const DIAGRAM_DECLARATIONS = [
+    "C4Context", "C4Container", "C4Component",
+    "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
+    "flowchart", "mindmap", "quadrantChart", "gantt", "timeline", "graph"
+  ];
+
+  // ── Category 2: C4 function keywords (always followed by `(`) ────────────
+  const C4_FUNC_KEYWORDS = [
+    "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
+    "ContainerDb_Ext", "ContainerQueue_Ext",
+    "System_Boundary", "Container_Boundary",
+    "ContainerDb", "ContainerQueue",
+    "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
+    "Container", "Component", "Boundary",
+    "Person", "System", "Rel"
+  ];
+
+  // ── Category 3: Plain Mermaid keywords ───────────────────────────────────
+  // Preceded by whitespace in valid Mermaid but may be squashed after word chars.
+  // Use negative lookbehind (?<!\w) instead of \b to handle word-char→keyword.
+  const PLAIN_KEYWORDS = [
+    "direction",
+    "classDef", "class",
+    "participant", "actor", "autonumber", "loop", "rect", "opt", "alt", "else",
+    "state", "dateFormat", "axisFormat", "section",
+    "x-axis", "y-axis", "quadrant-1", "quadrant-2", "quadrant-3", "quadrant-4",
+    "title", "end"
+  ];
+
+  // ── Category 4: Structural block keywords ────────────────────────────────
+  // subgraph and end MUST always start on a fresh line regardless of what
+  // character precedes them. They can appear after a word char ("TDsubgraph")
+  // so (?<![\w]) lookbehind would block the match. Use unconditional pattern.
+  const STRUCTURAL_KEYWORDS = ["subgraph"];
+
+  /**
+   * One full sweep: split all squashed statements by inserting \n before each
+   * recognized keyword. Runs on unquoted segments only to preserve labels.
+   * Called in a do-while loop until idempotent.
+   */
+  const applySplitPass = (input: string): string => {
+    let segments = input.split('"');
+    // If there's an unclosed quote (even number of segments), treat the whole string as unquoted
+    // to prevent the sanitizer from being completely bypassed and crashing the renderer.
+    if (segments.length % 2 === 0) {
+      segments = [input];
+    }
+
+    for (let i = 0; i < segments.length; i += 2) {
+      let seg = segments[i];
+
+      // Category 4 — structural block keywords (subgraph / end) — MUST run
+      // FIRST, before Category 1, because Category 1 contains "graph" which
+      // would otherwise split "subgraph" → "sub\ngraph". By inserting the
+      // newline before "subgraph" as one atomic unit first, the whole word
+      // is already on its own line and Category 1 never sees a bare "graph".
+      for (const kw of STRUCTURAL_KEYWORDS) {
+        const regex = new RegExp(`([^\\n])(${kw}(?:\\s|$))`, "g");
+        seg = seg.replace(regex, "$1\n$2");
+      }
+
+      // Category 1 — diagram declarations: no `(`, no \b required
+      for (const kw of DIAGRAM_DECLARATIONS) {
+        const pattern = kw === "graph" ? "(?<!sub)graph" : kw;
+        const regex = new RegExp(`([^\\n])(${pattern})`, "g");
+        seg = seg.replace(regex, "$1\n$2");
+        // Also split if followed immediately by a letter (e.g. C4Contexttitle -> C4Context\ntitle)
+        const trailingRegex = new RegExp(`(${pattern})([a-zA-Z])`, "g");
+        seg = seg.replace(trailingRegex, "$1\n$2");
+      }
+
+      // Category 2 — C4 function calls: keyword must be followed by (
+      // Match any character except newline and underscore (avoid splitting System_Boundary into System_\nBoundary)
+      for (const kw of C4_FUNC_KEYWORDS) {
+        const regex = new RegExp(`([^\\n_])\\s*(${kw}\\s*\\()`, "g");
+        seg = seg.replace(regex, "$1\n$2");
+      }
+
+
+      // Special: direction TD/LR/TB/BT/RL — two passes:
+      //  1. Ensure direction starts on its own line (split before it)
+      //  2. Ensure NOTHING follows the direction value on the same line
+      //     (e.g. "direction TDSystem_Boundary" → "direction TD\nSystem_Boundary")
+      seg = seg.replace(/([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+      seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))(\S)/gi, "$1\n$2");
+
+
+      // Category 3 — plain keywords: negative lookbehind (?<!\w) instead of
+      // \b so we correctly split word-char→keyword (e.g. "Platformtitle").
+      // NOTE: subgraph/end are intentionally excluded — they live in Cat 4.
+      for (const kw of PLAIN_KEYWORDS) {
+        const escaped = kw.replace(/[-]/g, "\\-");
+        const regex = new RegExp(`([^\\n])((?<![\\w])${escaped}(?:\\s+|:|(?=\\s*$)))`, "g");
+        seg = seg.replace(regex, "$1\n$2");
+      }
+
+      segments[i] = seg;
+    }
+    return segments.join('"');
+  };
+
+  // Multi-pass: repeat until idempotent (no further changes), max 20 passes
+  let prev: string;
+  let iterations = 0;
+  do {
+    prev = clean;
+    clean = applySplitPass(clean);
+    iterations++;
+  } while (clean !== prev && iterations < 20);
+
+  // ── Final safety-net passes ───────────────────────────────────────────────
+  // Targets squash patterns that survive the quote-aware loop, such as a
+  // flowchart declaration merged directly against a subgraph statement.
+
+  // 1. flowchart/graph + direction squashed against subgraph / end.
+  //    Use explicit direction alternation instead of \w+ so "TD" isn't
+  //    consumed together with the following keyword as one token.
+  const DIR = "(?:TD|LR|TB|BT|RL)";
+  clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(subgraph)`, "gi"), "$1\n$2");
+  clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(graph)`,    "gi"), "$1\n$2");
+  clean = clean.replace(new RegExp(`(graph\\s+${DIR})(subgraph)`,     "gi"), "$1\n$2");
+  clean = clean.replace(new RegExp(`(graph\\s+${DIR})(graph)`,        "gi"), "$1\n$2");
+
+  // 2. Any remaining keyword-to-keyword merges that survived the loop
+  clean = clean.replace(/(subgraph\s+\S+)(subgraph)/gi, "$1\n$2");
+  clean = clean.replace(/(\bend\b)(subgraph)/gi,         "$1\n$2");
+  clean = clean.replace(/(\bend\b)(flowchart)/gi,        "$1\n$2");
+  clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(end\\b)`, "gi"), "$1\n$2");
+
+  // LAYOUT_WITH_LEGEND always on its own line
+  clean = clean.replace(/\s*LAYOUT_WITH_LEGEND(\(\))?\s*/gi, "\nLAYOUT_WITH_LEGEND()\n");
+  // Collapse excessive blank lines
+  clean = clean.replace(/\n{3,}/g, "\n\n");
   return clean.trim();
 }
 

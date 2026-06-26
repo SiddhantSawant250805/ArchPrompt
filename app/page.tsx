@@ -79,7 +79,7 @@ export default function Home() {
   // APPLICATION STATE
   // ----------------------------------------------------
   const [diagramType, setDiagramType] = useState<string>("auto");
-  const [compilerMethod, setCompilerMethod] = useState<"deterministic" | "gemini">("deterministic");
+  const [compilerMethod, setCompilerMethod] = useState<"visual" | "deterministic" | "gemini">("visual");
   const [promptInput, setPromptInput] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const [stateHistory, setStateHistory] = useState<HistoryEntry[]>([]);
@@ -341,7 +341,7 @@ export default function Home() {
       setMermaidCode(code);
 
       // Render the Mermaid SVG client side
-      await renderMermaidMarkup(code);
+      const renderedSvg = await renderMermaidMarkup(code);
 
       // Land user on the Canvas preview tab right away
       setActiveTab("diagram");
@@ -349,9 +349,57 @@ export default function Home() {
 
       let drawioDataXML: string | null = null;
 
-      if (compilerMethod === "deterministic") {
+      if (compilerMethod === "visual") {
+        if (renderedSvg) {
+          try {
+            const xml = compileSvgToDrawioXml(renderedSvg);
+            drawioDataXML = xml;
+            setDrawioXML(xml);
+            setDrawioStatus("loaded");
+            if (drawioReady) {
+              iframeRef.current?.contentWindow?.postMessage(
+                JSON.stringify({ action: "load", xml, autosave: 1 }),
+                "*"
+              );
+            }
+          } catch (localErr: any) {
+            console.error("Visual compilation to drawio failed, falling back to deterministic...", localErr);
+            try {
+              const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined);
+              drawioDataXML = xml;
+              setDrawioXML(xml);
+              setDrawioStatus("loaded");
+              if (drawioReady) {
+                iframeRef.current?.contentWindow?.postMessage(
+                  JSON.stringify({ action: "load", xml, autosave: 1 }),
+                  "*"
+                );
+              }
+            } catch (fallbackErr: any) {
+              setDrawioStatus("error");
+              setDrawioError(fallbackErr.message || "Failed to compile visual diagram.");
+            }
+          }
+        } else {
+          try {
+            const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined);
+            drawioDataXML = xml;
+            setDrawioXML(xml);
+            setDrawioStatus("loaded");
+            if (drawioReady) {
+              iframeRef.current?.contentWindow?.postMessage(
+                JSON.stringify({ action: "load", xml, autosave: 1 }),
+                "*"
+              );
+            }
+          } catch (fallbackErr: any) {
+            setDrawioStatus("error");
+            setDrawioError("No SVG was rendered and deterministic fallback failed.");
+          }
+        }
+      } else if (compilerMethod === "deterministic") {
         try {
-          const xml = compileBlueprintToDrawio(targetBlueprint);
+          const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined);
           drawioDataXML = xml;
           setDrawioXML(xml);
           setDrawioStatus("loaded");
@@ -405,7 +453,7 @@ export default function Home() {
           }
         } else {
           try {
-            const xml = compileBlueprintToDrawio(targetBlueprint);
+            const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined);
             drawioDataXML = xml;
             setDrawioXML(xml);
             setDrawioStatus("loaded");
@@ -828,28 +876,319 @@ export default function Home() {
   // ----------------------------------------------------
   // CLIENT MERMAID GENERATOR RENDERER
   // ----------------------------------------------------
-  const renderMermaidMarkup = async (code: string) => {
+  const sanitizeMermaidCode = (code: string): string => {
+    // Normalize line endings
+    let clean = code.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+    // ── Category 1: Diagram-type declarations ────────────────────────────────
+    // These are standalone keywords with NO parentheses that may be squashed
+    // directly against another word character (e.g. "C4Contexttitle").
+    // MUST NOT use \b because the preceding character is also a word char.
+    const DIAGRAM_DECLARATIONS = [
+      "C4Context", "C4Container", "C4Component",
+      "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
+      "flowchart", "mindmap", "quadrantChart", "gantt", "timeline", "graph"
+    ];
+
+    // ── Category 2: C4 function keywords (always followed by `(`) ────────────
+    // These can appear after any character, including another word char.
+    const C4_FUNC_KEYWORDS = [
+      "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
+      "ContainerDb_Ext", "ContainerQueue_Ext",
+      "System_Boundary", "Container_Boundary",
+      "ContainerDb", "ContainerQueue",
+      "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
+      "Container", "Component", "Boundary",
+      "Person", "System", "Rel"
+    ];
+
+    // ── Category 3: Plain Mermaid keywords ───────────────────────────────────
+    // These are preceded by whitespace in valid code but may be squashed after
+    // punctuation/symbols. Matched without requiring \b (which fails
+    // word-char → word-char boundaries like "Platformtitle").
+    const PLAIN_KEYWORDS = [
+      "direction",
+      "classDef", "class",
+      "participant", "actor", "autonumber", "loop", "rect", "opt", "alt", "else",
+      "state", "dateFormat", "axisFormat", "section",
+      "x-axis", "y-axis", "quadrant-1", "quadrant-2", "quadrant-3", "quadrant-4",
+      "title", "end"
+    ];
+
+    // ── Category 4: Structural block keywords ─────────────────────────────────
+    // subgraph and end MUST always start on a fresh line regardless of what
+    // character precedes them. Critically, they can appear directly after a
+    // direction word-char (e.g. "TDsubgraph") so we CANNOT use the
+    // (?<![\w]) lookbehind used in Category 3 — it would block the match.
+    // Instead use the same unconditional ([^\n])(keyword) pattern as Cat 1.
+    const STRUCTURAL_KEYWORDS = ["subgraph"];
+
+    /**
+     * One full sweep: split all squashed statements by inserting \n before each
+     * recognized keyword. Runs on unquoted segments only to preserve labels.
+     * Called in a do-while loop until idempotent.
+     */
+    const applySplitPass = (input: string): string => {
+      let segments = input.split('"');
+      // If there's an unclosed quote (even number of segments), treat the whole string as unquoted
+      // to prevent the sanitizer from being completely bypassed and crashing the renderer.
+      if (segments.length % 2 === 0) {
+        segments = [input];
+      }
+
+      for (let i = 0; i < segments.length; i += 2) {
+        let seg = segments[i];
+
+        // Category 4 — structural block keywords (subgraph / end) — MUST run
+        // FIRST, before Category 1, because Category 1 contains "graph" which
+        // would otherwise split "subgraph" → "sub\ngraph". By inserting the
+        // newline before "subgraph" as one atomic unit first, the whole word
+        // is already on its own line and Category 1 never sees a bare "graph".
+        for (const kw of STRUCTURAL_KEYWORDS) {
+          const regex = new RegExp(`([^\\n])(${kw}(?:\\s|$))`, "g");
+          seg = seg.replace(regex, "$1\n$2");
+        }
+
+        // Category 1 — diagram declarations: no `(`, no \b required
+        // Match any non-newline char immediately followed by the keyword
+        for (const kw of DIAGRAM_DECLARATIONS) {
+          const pattern = kw === "graph" ? "(?<!sub)graph" : kw;
+          const regex = new RegExp(`([^\\n])(${pattern})`, "g");
+          seg = seg.replace(regex, "$1\n$2");
+          // Also split if followed immediately by a letter (e.g. C4Contexttitle -> C4Context\ntitle)
+          const trailingRegex = new RegExp(`(${pattern})([a-zA-Z])`, "g");
+          seg = seg.replace(trailingRegex, "$1\n$2");
+        }
+
+        // Category 2 — C4 function calls: keyword followed by (
+        // Match any character except newline and underscore (avoid splitting System_Boundary into System_\nBoundary)
+        for (const kw of C4_FUNC_KEYWORDS) {
+          const regex = new RegExp(`([^\\n_])\\s*(${kw}\\s*\\()`, "g");
+          seg = seg.replace(regex, "$1\n$2");
+        }
+
+
+        // Special: direction TD/LR/TB/BT/RL — two passes:
+        //  1. Ensure direction starts on its own line (split before it)
+        //  2. Ensure NOTHING follows the direction value on the same line
+        //     (e.g. "direction TDSystem_Boundary" → "direction TD\nSystem_Boundary")
+        seg = seg.replace(/([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+        seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))(\S)/gi, "$1\n$2");
+
+        // Category 3 — plain keywords: use (?<![\w]) instead of \b so we
+        // correctly split word-char→keyword transitions (e.g. "Platformtitle").
+        // NOTE: subgraph/end are intentionally excluded — they live in Cat 4.
+        for (const kw of PLAIN_KEYWORDS) {
+          // Escape any special regex chars in the keyword (e.g. `-` in x-axis)
+          const escaped = kw.replace(/[-]/g, "\\-");
+          // (?<![\w]) is a lookbehind: keyword must NOT be preceded by a word char
+          const regex = new RegExp(`([^\\n])((?<![\\w])${escaped}(?:\\s+|:|(?=\\s*$)))`, "g");
+          seg = seg.replace(regex, "$1\n$2");
+        }
+
+        segments[i] = seg;
+      }
+      return segments.join('"');
+    };
+
+    // Multi-pass: repeat until idempotent (no further changes), max 20 passes
+    let prev: string;
+    let iterations = 0;
+    do {
+      prev = clean;
+      clean = applySplitPass(clean);
+      iterations++;
+    } while (clean !== prev && iterations < 20);
+
+    // ── Final safety-net passes (applied AFTER the multi-pass loop) ─────────
+    // These target specific squash patterns that survive unquoted-segment
+    // processing: flowchart/graph declarations merged with the next statement.
+
+    // 1. flowchart/graph + direction squashed against subgraph / end / another graph keyword.
+    //    IMPORTANT: use explicit direction alternation instead of \w+ so "TD" doesn't
+    //    get swallowed together with the following keyword into one token.
+    const DIR = "(?:TD|LR|TB|BT|RL)";
+    clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(subgraph)`, "gi"), "$1\n$2");
+    clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(graph)`,    "gi"), "$1\n$2");
+    clean = clean.replace(new RegExp(`(graph\\s+${DIR})(subgraph)`,     "gi"), "$1\n$2");
+    clean = clean.replace(new RegExp(`(graph\\s+${DIR})(graph)`,        "gi"), "$1\n$2");
+
+    // 2. Any remaining keyword-to-keyword merges that survived the loop
+    clean = clean.replace(/(subgraph\s+\S+)(subgraph)/gi, "$1\n$2");
+    clean = clean.replace(/(\bend\b)(subgraph)/gi,         "$1\n$2");
+    clean = clean.replace(/(\bend\b)(flowchart)/gi,        "$1\n$2");
+    clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(end\\b)`, "gi"), "$1\n$2");
+
+    // LAYOUT_WITH_LEGEND always on its own line
+    clean = clean.replace(/\s*LAYOUT_WITH_LEGEND(\(\))?\s*/gi, "\nLAYOUT_WITH_LEGEND()\n");
+
+    // Collapse excessive blank lines
+    clean = clean.replace(/\n{3,}/g, "\n\n");
+    return clean.trim();
+  };
+
+  interface ValidationResult {
+    isValid: boolean;
+    lineNum?: number;
+    lineContent?: string;
+    errorMsg?: string;
+  }
+
+  const validateMermaidStatements = (code: string): ValidationResult => {
+    const lines = code.split("\n");
+    const keywords = [
+      "C4Context", "C4Container", "C4Component", "direction",
+      "Person", "System", "Container", "Component", "Boundary", "Rel",
+      "subgraph", "end", "classDef", "class", "participant", "actor",
+      "erDiagram", "classDiagram", "stateDiagram-v2", "gantt", "timeline", "mindmap",
+      "quadrantChart", "title", "flowchart", "graph"
+    ];
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line || line.startsWith("%%")) continue;
+      
+      let statementCount = 0;
+      const matchedKeywords: string[] = [];
+      
+      // Split by double quotes to ignore keywords inside labels
+      const parts = line.split('"');
+      const outsideQuotes = parts.filter((_, idx) => idx % 2 === 0).join(" ");
+      
+      for (const kw of keywords) {
+        let regex: RegExp;
+        if (["Person", "System", "Container", "Component", "Boundary", "Rel"].includes(kw)) {
+          regex = new RegExp(`\\b${kw}\\s*\\(`, "i");
+        } else {
+          regex = new RegExp(`\\b${kw}\\b`, "i");
+        }
+        
+        if (regex.test(outsideQuotes)) {
+          statementCount++;
+          matchedKeywords.push(kw);
+        }
+      }
+      
+      if (statementCount > 1) {
+        return {
+          isValid: false,
+          lineNum: i + 1,
+          lineContent: lines[i],
+          errorMsg: `Validation failed: Line ${i + 1} contains multiple squashed statements: "${lines[i]}" (detected keywords: ${matchedKeywords.join(", ")})`
+        };
+      }
+    }
+    
+    return { isValid: true };
+  };
+
+  const renderMermaidMarkup = async (code: string): Promise<string | null> => {
     if (typeof window === "undefined" || !(window as any).mermaid) {
       setCanvasError("Mermaid.js CDN library is not loaded onto browser.");
-      return;
+      return null;
     }
+    const cleanCode = sanitizeMermaidCode(code);
+
+    const sanitizeMermaid = (c: string): string => {
+      return c
+        .replace(/\r\n/g, '\n')
+        // Fix merged flowchart declaration + subgraph
+        .replace(/(flowchart\s+(?:LR|RL|TD|TB|BT))(subgraph)/gi, '$1\n$2')
+        // Fix any other keyword merges on the same line
+        .replace(/(flowchart\s+(?:LR|RL|TD|TB|BT))(graph)/gi, '$1\n$2')
+        // Ensure end keyword is always on its own line
+        .replace(/([^\n])\b(end)\b(\s*\n)/gi, '$1\nend\n')
+        // Collapse excessive blank lines
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    };
+
+    const finalCode = sanitizeMermaid(cleanCode);
+
+    if (finalCode !== code) {
+      setMermaidCode(finalCode);
+    }
+
+    // Pre-rendering statement validation
+    const validation = validateMermaidStatements(finalCode);
+    if (!validation.isValid) {
+      console.warn("Validation failed for Mermaid source code:", validation.errorMsg);
+      setCanvasError(validation.errorMsg || "Syntax validation failed.");
+      return null;
+    }
+
     const m = (window as any).mermaid;
-    const renderId = "mermaid-rendering-temp";
+    const renderId = "mermaid-render-" + Math.random().toString(36).substring(2, 9);
     try {
-      const { svg } = await m.render(renderId, code);
+      const { svg } = await m.render(renderId, finalCode);
       setCanvasSvg(svg);
       setCanvasError(null);
       // Auto centers the dynamic diagram view
       setTimeout(() => {
         autoFitDiagramView();
       }, 50);
+      return svg;
     } catch (e: any) {
       console.error("Client side parsing failed:", e);
       setCanvasError(e.message || "The compile engine failed to parse visual code styles.");
       // Clean up bad renderer states
       const badElem = document.getElementById(renderId);
       if (badElem) badElem.remove();
+      return null;
     }
+  };
+
+  /**
+   * Wraps the Mermaid-rendered SVG as a base64 image inside a draw.io mxfile.
+   * This guarantees pixel-perfect visual parity between the canvas and the iframe.
+   */
+  const compileSvgToDrawioXml = (svgString: string, title = "Architecture Diagram"): string => {
+    // Parse SVG dimensions from viewBox or width/height attributes
+    let svgW = 1600;
+    let svgH = 900;
+    const vbMatch = svgString.match(/viewBox="[^"]*?(\d+\.?\d*)\s+(\d+\.?\d*)\s+(\d+\.?\d*)\s+(\d+\.?\d*)"/);
+    if (vbMatch) {
+      svgW = Math.ceil(parseFloat(vbMatch[3]));
+      svgH = Math.ceil(parseFloat(vbMatch[4]));
+    } else {
+      const wMatch = svgString.match(/width="(\d+\.?\d*)"/);
+      const hMatch = svgString.match(/height="(\d+\.?\d*)"/);
+      if (wMatch) svgW = Math.ceil(parseFloat(wMatch[1]));
+      if (hMatch) svgH = Math.ceil(parseFloat(hMatch[1]));
+    }
+
+    // Ensure the SVG has xmlns so browsers can parse it as a standalone image
+    let normalizedSvg = svgString;
+    if (!normalizedSvg.includes("xmlns=")) {
+      normalizedSvg = normalizedSvg.replace("<svg", `<svg xmlns="http://www.w3.org/2000/svg"`);
+    }
+
+    // Encode as a data URI that draw.io can embed as an image shape
+    const base64Svg = btoa(unescape(encodeURIComponent(normalizedSvg)));
+    const dataUri = `data:image/svg+xml;base64,${base64Svg}`;
+
+    const escapeXmlAttr = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const safeDataUri = escapeXmlAttr(dataUri);
+
+    // Add a comfortable 40px margin on all sides
+    const margin = 40;
+    const pageW = svgW + margin * 2;
+    const pageH = svgH + margin * 2;
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="ArchPrompt" modified="${new Date().toISOString()}" agent="ArchPrompt" version="21.5.0" type="device">
+  <diagram id="diag_${Math.random().toString(36).substring(2, 9)}" name="${escapeXmlAttr(title)}">
+    <mxGraphModel dx="1200" dy="800" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1.0" pageWidth="${pageW}" pageHeight="${pageH}" background="#0A0A0A" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="2" value="" style="shape=image;verticalLabelPosition=bottom;labelBackgroundColor=none;verticalAlign=top;align=center;strokeColor=none;fillColor=none;image;image=${safeDataUri};aspect=fixed;" vertex="1" parent="1">
+          <mxGeometry x="${margin}" y="${margin}" width="${svgW}" height="${svgH}" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>`;
   };
 
   const manualPushCodeToCanvas = async (customCode: string) => {
@@ -944,8 +1283,39 @@ export default function Home() {
     setDrawioStatus("loading");
     setDrawioError(null);
     try {
-      if (compilerMethod === "deterministic") {
-        const xml = compileBlueprintToDrawio(lastBlueprint);
+      if (compilerMethod === "visual") {
+        if (canvasSvg) {
+          const xml = compileSvgToDrawioXml(canvasSvg);
+          setDrawioXML(xml);
+          setDrawioStatus("loaded");
+          if (drawioReady) {
+            iframeRef.current?.contentWindow?.postMessage(
+              JSON.stringify({ action: "load", xml, autosave: 1 }),
+              "*"
+            );
+          }
+          triggerToast("Visual parity compiled successfully! ✓", false);
+        } else if (mermaidCode) {
+          const renderedSvg = await renderMermaidMarkup(mermaidCode);
+          if (renderedSvg) {
+            const xml = compileSvgToDrawioXml(renderedSvg);
+            setDrawioXML(xml);
+            setDrawioStatus("loaded");
+            if (drawioReady) {
+              iframeRef.current?.contentWindow?.postMessage(
+                JSON.stringify({ action: "load", xml, autosave: 1 }),
+                "*"
+              );
+            }
+            triggerToast("Visual parity compiled successfully! ✓", false);
+          } else {
+            throw new Error("Could not render Mermaid SVG for Visual parity compilation.");
+          }
+        } else {
+          throw new Error("SVG content not found for Visual parity compiler.");
+        }
+      } else if (compilerMethod === "deterministic") {
+        const xml = compileBlueprintToDrawio(lastBlueprint, canvasSvg || undefined);
         setDrawioXML(xml);
         setDrawioStatus("loaded");
         if (drawioReady) {
@@ -981,6 +1351,13 @@ export default function Home() {
       setDrawioError(err.message || "Failed on retry compilation.");
     }
   };
+
+  // Automatically re-compile draw.io XML when the compiler method changes
+  useEffect(() => {
+    if (lastBlueprint) {
+      retryDrawioGeneration();
+    }
+  }, [compilerMethod]);
 
   // ----------------------------------------------------
   // RESTORE HISTORIC GENERATIONS
@@ -1201,7 +1578,20 @@ export default function Home() {
               <Settings className="h-3.5 w-3.5 text-[#d4ff00]" />
               Draw.io Compiler Method
             </label>
-            <div className="grid grid-cols-2 gap-2 bg-white/5 p-1 rounded-xl border border-white/10">
+            <div className="grid grid-cols-3 gap-2 bg-white/5 p-1 rounded-xl border border-white/10">
+              <button
+                type="button"
+                onClick={() => setCompilerMethod("visual")}
+                className={`py-2 text-[10px] font-mono font-bold tracking-wider uppercase rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${
+                  compilerMethod === "visual"
+                    ? "bg-[#d4ff00]/10 text-[#d4ff00] border border-[#d4ff00]/25 shadow-[0_0_8px_rgba(212,255,0,0.08)] font-bold"
+                    : "text-[#999999] hover:text-[#F0F0F0] hover:bg-white/5 border border-transparent font-normal"
+                }`}
+                title="Embed the exact Mermaid SVG inside draw.io to guarantee pixel-perfect visual parity"
+              >
+                <Eye className="h-3 w-3" />
+                Visual
+              </button>
               <button
                 type="button"
                 onClick={() => setCompilerMethod("deterministic")}

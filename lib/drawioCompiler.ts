@@ -4,7 +4,7 @@
  * and beautifully spaced native draw.io XML on a dark enterprise-grid canvas.
  */
 
-export function compileBlueprintToDrawio(blueprint: any): string {
+export function compileBlueprintToDrawio(blueprint: any, renderedSvg?: string): string {
   if (!blueprint) return "";
 
   const title = blueprint.title || "Architecture Diagram";
@@ -145,75 +145,238 @@ export function compileBlueprintToDrawio(blueprint: any): string {
     nodesByGroup["ungrouped_group"] = missingNodes;
   }
 
-  // Layout geometry calculations:
-  // Compact, beautifully aligned grids ensuring absolutely no overlaps
+  // Layout geometry constants
   const nodeW = 160;
   const nodeH = 60;
-  const nodeGapX = 80;  // Balanced to keep nodes tight but give enough area for lines
-  const nodeGapY = 75;  // Compact vertical gap that still lets routes turn orthogonally
-  const paddingL = 30;  // Clean left padding
-  const paddingR = 30;  // Clean right padding
-  const paddingT = 55;  // Space for group header title
-  const paddingB = 30;  // Clean bottom padding
+  const nodeGapX = 80;
+  const nodeGapY = 75;
+  const paddingL = 30;
+  const paddingR = 30;
+  const paddingT = 55;
+  const paddingB = 30;
 
+  // ── Step 1: Parse SVG node coordinates if available ──
+  interface NodePos {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    left: number;
+    top: number;
+  }
+
+  const parsedNodeLayouts: Record<string, NodePos> = {};
+  let hasParsedLayout = false;
+
+  if (renderedSvg && typeof window !== "undefined") {
+    try {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(renderedSvg, "image/svg+xml");
+      
+      const allNodeIds = new Set<string>();
+      for (const gp of allGroups) {
+        for (const n of gp.nodes || []) {
+          allNodeIds.add(n.id);
+        }
+      }
+
+      const gNodes = doc.querySelectorAll("g.node, g.mermaid-node");
+      for (const el of Array.from(gNodes)) {
+        const idAttr = el.getAttribute("id") || "";
+        let matchedNodeId: string | null = null;
+        for (const nodeId of allNodeIds) {
+          if (idAttr === nodeId ||
+              idAttr.startsWith(`flowchart-${nodeId}-`) ||
+              idAttr.split("-").includes(nodeId) ||
+              idAttr.replace(/^c4-/, "") === nodeId ||
+              idAttr.replace(/^c4-/, "").split("-")[0] === nodeId) {
+            matchedNodeId = nodeId;
+            break;
+          }
+        }
+
+        if (matchedNodeId) {
+          const transform = el.getAttribute("transform") || "";
+          const translateMatch = transform.match(/translate\(\s*(-?\d+\.?\d*)\s*[\s,]\s*(-?\d+\.?\d*)\s*\)/i);
+          if (translateMatch) {
+            const cx = parseFloat(translateMatch[1]);
+            const cy = parseFloat(translateMatch[2]);
+
+            let w = nodeW;
+            let h = nodeH;
+            const rect = el.querySelector("rect");
+            if (rect) {
+              const rectW = rect.getAttribute("width");
+              const rectH = rect.getAttribute("height");
+              if (rectW) w = parseFloat(rectW);
+              if (rectH) h = parseFloat(rectH);
+            } else {
+              const other = el.querySelector("path, polygon, circle, ellipse, foreignObject");
+              if (other) {
+                const otherW = other.getAttribute("width");
+                const otherH = other.getAttribute("height");
+                if (otherW && otherH) {
+                  w = parseFloat(otherW);
+                  h = parseFloat(otherH);
+                }
+              }
+            }
+
+            let left = cx - w / 2;
+            let top = cy - h / 2;
+
+            const rectX = rect?.getAttribute("x");
+            const rectY = rect?.getAttribute("y");
+            if (rectX && rectY) {
+              left = cx + parseFloat(rectX);
+              top = cy + parseFloat(rectY);
+            }
+
+            parsedNodeLayouts[matchedNodeId] = { x: cx, y: cy, w, h, left, top };
+          }
+        }
+      }
+
+      if (Object.keys(parsedNodeLayouts).length > 0) {
+        hasParsedLayout = true;
+      }
+    } catch (err) {
+      console.error("Error parsing SVG layout coordinates:", err);
+    }
+  }
+
+  // ── Step 2: Global translation shift to start diagram at (50, 50) ──
+  if (hasParsedLayout) {
+    let minL = Infinity;
+    let minT = Infinity;
+    for (const id in parsedNodeLayouts) {
+      const pos = parsedNodeLayouts[id];
+      if (pos.left < minL) minL = pos.left;
+      if (pos.top < minT) minT = pos.top;
+    }
+
+    if (minL !== Infinity && minT !== Infinity) {
+      const shiftX = 50 - minL;
+      const shiftY = 50 - minT;
+      for (const id in parsedNodeLayouts) {
+        const pos = parsedNodeLayouts[id];
+        pos.left += shiftX;
+        pos.top += shiftY;
+        pos.x += shiftX;
+        pos.y += shiftY;
+      }
+    }
+  }
+
+  // ── Step 3: Compute layouts for groups and nodes ──
   const groupLayouts: Record<string, { x: number; y: number; width: number; height: number; cols: number; rows: number }> = {};
-  
-  // Choose optimal group column allocation depending on target direction
-  const groupsPerRow = direction === "LR" ? 1 : 2; // For TD direction, group them in a neat 2-column grid
+  const nodeLayoutPositions: Record<string, { rx: number; ry: number; w: number; h: number }> = {};
 
-  let currentX = 50;
-  let currentY = 50;
-  let rowMaxHeight = 0;
+  let fallbackCurrentX = 50;
+  let fallbackCurrentY = 50;
+  let fallbackRowMaxHeight = 0;
+
+  let maxLayoutX = 1200;
+  let maxLayoutY = 900;
 
   for (let i = 0; i < allGroups.length; i++) {
     const gp = allGroups[i];
     const nodes = nodesByGroup[gp.id] || [];
     const count = nodes.length;
-
     if (count === 0) continue;
 
-    // Arrange nodes inside groups based on flow direction to match the visual canvas layout
-    // For Left-To-Right (LR) diagrams, prioritize wider horizontal layout rows
-    // For Top-To-Bottom (TD) diagrams, prioritize taller vertical stacks
-    let cols = 1;
-    if (direction === "LR") {
-      cols = count > 3 ? Math.ceil(count / 2) : count;
-    } else {
-      cols = count > 4 ? 2 : 1;
-    }
-    const rows = Math.ceil(count / cols);
+    const parsedNodesInGroup = nodes.filter(n => parsedNodeLayouts[n.id]);
 
-    const groupW = paddingL + paddingR + cols * nodeW + (cols - 1) * nodeGapX;
-    const groupH = paddingT + paddingB + rows * nodeH + (rows - 1) * nodeGapY;
+    if (hasParsedLayout && parsedNodesInGroup.length > 0) {
+      let groupMinL = Infinity;
+      let groupMaxR = -Infinity;
+      let groupMinT = Infinity;
+      let groupMaxB = -Infinity;
 
-    if (direction === "LR") {
-      // Linear layout flowing from left to right with snug 130px corridors
-      groupLayouts[gp.id] = { x: currentX, y: 50, width: groupW, height: groupH, cols, rows };
-      currentX += groupW + 130;
-    } else {
-      // 2-Column Grid Layout flowing vertically with snug 130px corridors to prevent excessive spacing
-      const colIdx = i % groupsPerRow;
-
-      if (colIdx === 0 && i > 0) {
-        currentY += rowMaxHeight + 130;
-        currentX = 50;
-        rowMaxHeight = 0;
+      for (const n of parsedNodesInGroup) {
+        const pos = parsedNodeLayouts[n.id];
+        if (pos.left < groupMinL) groupMinL = pos.left;
+        if (pos.left + pos.w > groupMaxR) groupMaxR = pos.left + pos.w;
+        if (pos.top < groupMinT) groupMinT = pos.top;
+        if (pos.top + pos.h > groupMaxB) groupMaxB = pos.top + pos.h;
       }
 
-      groupLayouts[gp.id] = { x: currentX, y: currentY, width: groupW, height: groupH, cols, rows };
-      rowMaxHeight = Math.max(rowMaxHeight, groupH);
-      currentX += groupW + 130;
-    }
-  }
+      const groupW = (groupMaxR - groupMinL) + paddingL + paddingR;
+      const groupH = (groupMaxB - groupMinT) + paddingT + paddingB;
+      const gx = groupMinL - paddingL;
+      const gy = groupMinT - paddingT;
 
-  // Find maximum coordinate boundaries to fit the page size perfectly
-  let maxLayoutX = 1200;
-  let maxLayoutY = 900;
-  for (const gp of allGroups) {
-    const layout = groupLayouts[gp.id];
-    if (layout) {
-      maxLayoutX = Math.max(maxLayoutX, layout.x + layout.width + 100);
-      maxLayoutY = Math.max(maxLayoutY, layout.y + layout.height + 100);
+      groupLayouts[gp.id] = { x: gx, y: gy, width: groupW, height: groupH, cols: 0, rows: 0 };
+      maxLayoutX = Math.max(maxLayoutX, gx + groupW + 100);
+      maxLayoutY = Math.max(maxLayoutY, gy + groupH + 100);
+
+      for (const node of nodes) {
+        const pos = parsedNodeLayouts[node.id];
+        if (pos) {
+          nodeLayoutPositions[node.id] = {
+            rx: pos.left - gx,
+            ry: pos.top - gy,
+            w: pos.w,
+            h: pos.h
+          };
+        } else {
+          nodeLayoutPositions[node.id] = {
+            rx: paddingL,
+            ry: paddingT,
+            w: nodeW,
+            h: nodeH
+          };
+        }
+      }
+    } else {
+      let cols = 1;
+      if (direction === "LR") {
+        cols = count > 3 ? Math.ceil(count / 2) : count;
+      } else {
+        cols = count > 4 ? 2 : 1;
+      }
+      const rows = Math.ceil(count / cols);
+      const groupW = paddingL + paddingR + cols * nodeW + (cols - 1) * nodeGapX;
+      const groupH = paddingT + paddingB + rows * nodeH + (rows - 1) * nodeGapY;
+
+      let gx = fallbackCurrentX;
+      let gy = fallbackCurrentY;
+
+      if (direction === "LR") {
+        groupLayouts[gp.id] = { x: gx, y: gy, width: groupW, height: groupH, cols, rows };
+        fallbackCurrentX += groupW + 130;
+      } else {
+        const groupsPerRow = direction === "LR" ? 1 : 2;
+        const colIdx = i % groupsPerRow;
+        if (colIdx === 0 && i > 0) {
+          fallbackCurrentY += fallbackRowMaxHeight + 130;
+          fallbackCurrentX = 50;
+          fallbackRowMaxHeight = 0;
+          gx = fallbackCurrentX;
+          gy = fallbackCurrentY;
+        }
+        groupLayouts[gp.id] = { x: gx, y: gy, width: groupW, height: groupH, cols, rows };
+        fallbackRowMaxHeight = Math.max(fallbackRowMaxHeight, groupH);
+        fallbackCurrentX += groupW + 130;
+      }
+
+      maxLayoutX = Math.max(maxLayoutX, gx + groupW + 100);
+      maxLayoutY = Math.max(maxLayoutY, gy + groupH + 100);
+
+      for (let idx = 0; idx < nodes.length; idx++) {
+        const node = nodes[idx];
+        const r = Math.floor(idx / cols);
+        const c = idx % cols;
+        const rx = paddingL + c * (nodeW + nodeGapX);
+        const ry = paddingT + r * (nodeH + nodeGapY);
+
+        nodeLayoutPositions[node.id] = {
+          rx,
+          ry,
+          w: nodeW,
+          h: nodeH
+        };
+      }
     }
   }
 
@@ -229,7 +392,7 @@ export function compileBlueprintToDrawio(blueprint: any): string {
   let currentId = 2;
   const nodeCellIdMap: Record<string, number> = {};
 
-  // Render group boxes (rendered first so nodes sit nicely on top of them)
+  // Render group boxes
   for (const gp of allGroups) {
     const layout = groupLayouts[gp.id];
     if (!layout) continue;
@@ -244,31 +407,24 @@ export function compileBlueprintToDrawio(blueprint: any): string {
     xml += `          <mxGeometry x="${layout.x}" y="${layout.y}" width="${layout.width}" height="${layout.height}" as="geometry"/>\n`;
     xml += `        </mxCell>\n`;
 
-    // Render individual grid-aligned nodes inside the group
+    // Render individual nodes using their calculated relative coordinates
     const nodes = nodesByGroup[gp.id] || [];
-    const cols = layout.cols;
-
     for (let idx = 0; idx < nodes.length; idx++) {
       const node = nodes[idx];
       const nodeCellId = currentId++;
       nodeCellIdMap[node.id] = nodeCellId;
 
-      const r = Math.floor(idx / cols);
-      const c = idx % cols;
-
-      const rx = paddingL + c * (nodeW + nodeGapX);
-      const ry = paddingT + r * (nodeH + nodeGapY);
-
+      const layoutPos = nodeLayoutPositions[node.id] || { rx: paddingL, ry: paddingT, w: nodeW, h: nodeH };
       const nLabel = escapeXml(node.label);
       const nStyle = getNodeStyle(node.type || "service", node.shape || "rect");
 
       xml += `        <mxCell id="${nodeCellId}" value="${nLabel}" style="${nStyle}" vertex="1" parent="${groupCellId}">\n`;
-      xml += `          <mxGeometry x="${rx}" y="${ry}" width="${nodeW}" height="${nodeH}" as="geometry"/>\n`;
+      xml += `          <mxGeometry x="${layoutPos.rx}" y="${layoutPos.ry}" width="${layoutPos.w}" height="${layoutPos.h}" as="geometry"/>\n`;
       xml += `        </mxCell>\n`;
     }
   }
 
-  // Pre-calculate edge frequencies to spread connection ports evenly and avoid overlap
+  // Pre-calculate edge frequencies
   const sourceEdgeCount: Record<string, number> = {};
   const targetEdgeCount: Record<string, number> = {};
   const sourceEdgeIndex: Record<string, number> = {};
@@ -285,7 +441,7 @@ export function compileBlueprintToDrawio(blueprint: any): string {
     }
   }
 
-  // Render connector line paths (connected cleanly to IDs with port distribution)
+  // Render connector line paths with relative geometric distribution
   if (edges && Array.isArray(edges)) {
     for (const edge of edges) {
       const sourceCellId = nodeCellIdMap[edge.from];
@@ -308,27 +464,55 @@ export function compileBlueprintToDrawio(blueprint: any): string {
       let exitPort = "";
       let entryPort = "";
 
-      if (direction === "LR") {
-        // Spread outbound vertically along the right face (exitX=1)
-        const exitY = sTotal > 1 ? (0.2 + (0.6 * sIdx) / (sTotal - 1)) : 0.5;
-        exitPort = `exitX=1;exitY=${exitY.toFixed(2)}`;
+      const sLayout = parsedNodeLayouts[edge.from];
+      const tLayout = parsedNodeLayouts[edge.to];
 
-        // Spread inbound vertically along the left face (entryX=0)
-        const entryY = tTotal > 1 ? (0.2 + (0.6 * tIdx) / (tTotal - 1)) : 0.5;
-        entryPort = `entryX=0;entryY=${entryY.toFixed(2)}`;
+      if (hasParsedLayout && sLayout && tLayout) {
+        const dx = tLayout.x - sLayout.x;
+        const dy = tLayout.y - sLayout.y;
+
+        if (Math.abs(dx) > Math.abs(dy)) {
+          if (dx > 0) {
+            const exitY = sTotal > 1 ? (0.2 + (0.6 * sIdx) / (sTotal - 1)) : 0.5;
+            exitPort = `exitX=1;exitY=${exitY.toFixed(2)}`;
+            const entryY = tTotal > 1 ? (0.2 + (0.6 * tIdx) / (tTotal - 1)) : 0.5;
+            entryPort = `entryX=0;entryY=${entryY.toFixed(2)}`;
+          } else {
+            const exitY = sTotal > 1 ? (0.2 + (0.6 * sIdx) / (sTotal - 1)) : 0.5;
+            exitPort = `exitX=0;exitY=${exitY.toFixed(2)}`;
+            const entryY = tTotal > 1 ? (0.2 + (0.6 * tIdx) / (tTotal - 1)) : 0.5;
+            entryPort = `entryX=1;entryY=${entryY.toFixed(2)}`;
+          }
+        } else {
+          if (dy > 0) {
+            const exitX = sTotal > 1 ? (0.2 + (0.6 * sIdx) / (sTotal - 1)) : 0.5;
+            exitPort = `exitX=${exitX.toFixed(2)};exitY=1`;
+            const entryX = tTotal > 1 ? (0.2 + (0.6 * tIdx) / (tTotal - 1)) : 0.5;
+            entryPort = `entryX=${entryX.toFixed(2)};entryY=0`;
+          } else {
+            const exitX = sTotal > 1 ? (0.2 + (0.6 * sIdx) / (sTotal - 1)) : 0.5;
+            exitPort = `exitX=${exitX.toFixed(2)};exitY=0`;
+            const entryX = tTotal > 1 ? (0.2 + (0.6 * tIdx) / (tTotal - 1)) : 0.5;
+            entryPort = `entryX=${entryX.toFixed(2)};entryY=1`;
+          }
+        }
       } else {
-        // Spread outbound horizontally along the bottom face (exitY=1)
-        const exitX = sTotal > 1 ? (0.2 + (0.6 * sIdx) / (sTotal - 1)) : 0.5;
-        exitPort = `exitX=${exitX.toFixed(2)};exitY=1`;
-
-        // Spread inbound horizontally along the top face (entryY=0)
-        const entryX = tTotal > 1 ? (0.2 + (0.6 * tIdx) / (tTotal - 1)) : 0.5;
-        entryPort = `entryX=${entryX.toFixed(2)};entryY=0`;
+        if (direction === "LR") {
+          const exitY = sTotal > 1 ? (0.2 + (0.6 * sIdx) / (sTotal - 1)) : 0.5;
+          exitPort = `exitX=1;exitY=${exitY.toFixed(2)}`;
+          const entryY = tTotal > 1 ? (0.2 + (0.6 * tIdx) / (tTotal - 1)) : 0.5;
+          entryPort = `entryX=0;entryY=${entryY.toFixed(2)}`;
+        } else {
+          const exitX = sTotal > 1 ? (0.2 + (0.6 * sIdx) / (sTotal - 1)) : 0.5;
+          exitPort = `exitX=${exitX.toFixed(2)};exitY=1`;
+          const entryX = tTotal > 1 ? (0.2 + (0.6 * tIdx) / (tTotal - 1)) : 0.5;
+          entryPort = `entryX=${entryX.toFixed(2)};entryY=0`;
+        }
       }
 
       const eStyle = getEdgeStyle(edge.style || "solid", exitPort, entryPort);
 
-      xml += `        <mxCell id="${edgeCellId}" value="${eLabel}" style="${eStyle}" edge="1" parent="1" source="${sourceCellId}" target="${targetCellId}">\n`;
+      xml += `        <mxCell id="${edgeCellId}" value="${eStyle === "" ? "" : eLabel}" style="${eStyle}" edge="1" parent="1" source="${sourceCellId}" target="${targetCellId}">\n`;
       xml += `          <mxGeometry relative="1" as="geometry">\n`;
       xml += `            <mxPoint as="sourcePoint"/>\n`;
       xml += `            <mxPoint as="targetPoint"/>\n`;
