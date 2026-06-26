@@ -4,35 +4,7 @@ import React, { useState, useEffect, useRef } from "react";
 import Script from "next/script";
 import { motion, AnimatePresence } from "motion/react";
 import { compileBlueprintToDrawio } from "../lib/drawioCompiler";
-import {
-  Sparkles,
-  Layers,
-  Code,
-  FileText,
-  Download,
-  Play,
-  RotateCcw,
-  Maximize2,
-  Edit3,
-  Settings,
-  History,
-  AlertTriangle,
-  RefreshCw,
-  Copy,
-  Check,
-  Eye,
-  ChevronRight,
-  Database,
-  Image as ImageIcon,
-  FolderTree,
-  MapPin,
-  Clock,
-  ExternalLink,
-  BookOpen,
-  Compass,
-  Paperclip,
-  Trash2
-} from "lucide-react";
+import { Sparkles, Layers, Code, FileText, Download, Play, RotateCcw, Maximize2, CreditCard as Edit3, Settings, History, TriangleAlert as AlertTriangle, RefreshCw, Copy, Check, Eye, ChevronRight, Database, Image as ImageIcon, FolderTree, MapPin, Clock, ExternalLink, BookOpen, Compass, Paperclip, Trash2 } from "lucide-react";
 
 // ----------------------------------------------------
 // LOCAL STORAGE HISTORY KEY
@@ -79,7 +51,7 @@ export default function Home() {
   // APPLICATION STATE
   // ----------------------------------------------------
   const [diagramType, setDiagramType] = useState<string>("auto");
-  const [compilerMethod, setCompilerMethod] = useState<"visual" | "deterministic" | "gemini">("visual");
+  const [compilerMethod, setCompilerMethod] = useState<"visual" | "deterministic" | "gemini">("deterministic");
   const [promptInput, setPromptInput] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const [stateHistory, setStateHistory] = useState<HistoryEntry[]>([]);
@@ -107,6 +79,16 @@ export default function Home() {
   const [drawioError, setDrawioError] = useState<string | null>(null);
   const [drawioXML, setDrawioXML] = useState<string | null>(null);
   const [drawioFormatOpen, setDrawioFormatOpen] = useState(false);
+
+  // GitHub Export State
+  const [githubModalOpen, setGithubModalOpen] = useState(false);
+  const [githubOwner, setGithubOwner] = useState<string>("");
+  const [githubRepo, setGithubRepo] = useState<string>("");
+  const [githubBranch, setGithubBranch] = useState<string>("main");
+  const [githubPath, setGithubPath] = useState<string>("diagrams/architecture.drawio");
+  const [githubCommitMessage, setGithubCommitMessage] = useState<string>("");
+  const [githubExportType, setGithubExportType] = useState<"drawio" | "svg" | "mermaid">("drawio");
+  const [githubPushing, setGithubPushing] = useState<boolean>(false);
 
   // UI Utilities
   const [toast, setToast] = useState<{ message: string; isErr: boolean } | null>(null);
@@ -1481,6 +1463,93 @@ export default function Home() {
     return "Architecture Preview";
   };
 
+  // ----------------------------------------------------
+  // GITHUB PUSH FUNCTIONALITY
+  // ----------------------------------------------------
+  const handleGithubPush = async () => {
+    if (!githubOwner.trim() || !githubRepo.trim()) {
+      triggerToast("Please provide repository owner and name", true);
+      return;
+    }
+
+    let contentToPush = "";
+    let fileExtension = "";
+    let contentType = "";
+
+    switch (githubExportType) {
+      case "drawio":
+        if (!drawioXML) {
+          triggerToast("No Draw.io XML available to export", true);
+          return;
+        }
+        contentToPush = drawioXML;
+        fileExtension = ".drawio";
+        contentType = "Draw.io XML";
+        break;
+      case "svg":
+        if (!canvasSvg) {
+          triggerToast("No SVG diagram available to export", true);
+          return;
+        }
+        contentToPush = canvasSvg;
+        fileExtension = ".svg";
+        contentType = "SVG diagram";
+        break;
+      case "mermaid":
+        if (!mermaidCode) {
+          triggerToast("No Mermaid code available to export", true);
+          return;
+        }
+        contentToPush = mermaidCode;
+        fileExtension = ".mmd";
+        contentType = "Mermaid source";
+        break;
+    }
+
+    setGithubPushing(true);
+
+    try {
+      const finalPath = githubPath.endsWith(fileExtension) ? githubPath : `${githubPath}${fileExtension}`;
+      const commitMsg = githubCommitMessage.trim() || `Update ${contentType}: ${lastBlueprint?.title || "Architecture Diagram"}`;
+
+      const res = await fetch("/api/github-push", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner: githubOwner,
+          repo: githubRepo,
+          branch: githubBranch,
+          path: finalPath,
+          message: commitMsg,
+          content: contentToPush,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "GitHub push failed");
+      }
+
+      triggerToast(`Successfully pushed to GitHub! ${data.url ? `View: ${data.url}` : ""}`, false);
+      setGithubModalOpen(false);
+      setGithubCommitMessage("");
+    } catch (err: any) {
+      console.error("GitHub push error:", err);
+      triggerToast(err.message || "Failed to push to GitHub", true);
+    } finally {
+      setGithubPushing(false);
+    }
+  };
+
+  const openGithubModal = () => {
+    if (!drawioXML && !canvasSvg && !mermaidCode) {
+      triggerToast("Generate a diagram first before exporting to GitHub", true);
+      return;
+    }
+    setGithubModalOpen(true);
+  };
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#0A0A0A] font-sans antialiased text-[#F0F0F0]">
       {/* Script for loading Mermaid.js with proper hydration bounds */}
@@ -1935,7 +2004,7 @@ export default function Home() {
                 <div className="bg-white/5 border-b border-white/10 px-5 py-2.5 flex items-center justify-between text-xs text-[#999999]">
                   <p className="flex items-center gap-2">
                     <Check className="h-4 w-4 text-[#d4ff00]" />
-                    <span>This canvas represents the <b className="text-[#F0F0F0]">Mermaid Fast Preview</b> space. Click <b className="text-[#F0F0F0]">Edit Diagram</b> to unlock editable shapes in draw.io.</span>
+                    <span>This canvas shows the <b className="text-[#F0F0F0]">Mermaid Diagram</b>. Edit in Draw.io tab, then click <b className="text-[#d4ff00]">Sync to Canvas</b> to see changes here.</span>
                   </p>
                   {mermaidCode && (
                     <button
@@ -1943,7 +2012,7 @@ export default function Home() {
                       className="px-3 py-1.5 bg-[#d4ff00]/10 text-[#d4ff00] border border-[#d4ff00]/20 hover:bg-[#d4ff00]/20 transition rounded-lg text-[11px] font-semibold flex items-center gap-1 hover:shadow-[0_0_10px_rgba(212,255,0,0.1)]"
                     >
                       <Edit3 className="h-3 w-3" />
-                      ✎ Edit Diagram
+                      Edit in Draw.io
                     </button>
                   )}
                 </div>
@@ -2039,6 +2108,17 @@ export default function Home() {
                         >
                           <Download className="h-3 w-3" />
                           SVG
+                        </button>
+                        <div className="h-4 w-px bg-white/10 mx-1" />
+                        <button
+                          onClick={openGithubModal}
+                          className="px-2.5 py-1.5 bg-[#d4ff00]/10 border border-[#d4ff00]/30 hover:bg-[#d4ff00]/20 text-[10px] text-[#d4ff00] font-semibold rounded-lg flex items-center gap-1 transition cursor-pointer"
+                          title="Push diagram to GitHub repository"
+                        >
+                          <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                          </svg>
+                          GitHub
                         </button>
                       </div>
                     )}
@@ -2438,7 +2518,7 @@ export default function Home() {
                           title="Toggle styling/format side controls"
                         >
                           <Settings className="h-3 w-3" />
-                          Format Panel
+                          Format
                         </button>
                         <button
                           onClick={triggerDrawioOutline}
@@ -2446,15 +2526,26 @@ export default function Home() {
                           title="Toggle overview minimap"
                         >
                           <Compass className="h-3 w-3" />
-                          Overview Map
+                          Overview
                         </button>
+                        <div className="h-4 w-px bg-white/10 mx-1" />
                         <button
                           onClick={requestDrawioSyncToCanvas}
-                          className="px-3 py-1.5 bg-[#d4ff00]/10 text-[#d4ff00] border border-[#d4ff00]/30 hover:bg-[#d4ff00]/20 transition rounded-lg text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer"
-                          title="Apply structural alignments back to diagram preview"
+                          className="px-4 py-1.5 bg-[#d4ff00]/15 text-[#d4ff00] border border-[#d4ff00]/30 hover:bg-[#d4ff00]/25 transition rounded-lg text-[11px] font-bold flex items-center gap-1.5 cursor-pointer"
+                          title="Synchronize edited diagram back to Mermaid canvas preview"
                         >
-                          <RefreshCw className="h-3 w-3 animate-spin-slow" />
-                          Sync back
+                          <RefreshCw className="h-3.5 w-3.5" />
+                          Sync to Canvas
+                        </button>
+                        <button
+                          onClick={openGithubModal}
+                          className="px-3 py-1.5 bg-white/5 text-[#F0F0F0] border border-white/10 hover:bg-white/10 hover:border-[#d4ff00]/30 transition rounded-lg text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer"
+                          title="Push diagram to GitHub repository"
+                        >
+                          <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                          </svg>
+                          GitHub
                         </button>
                       </>
                     )}
@@ -2465,7 +2556,7 @@ export default function Home() {
                         title="Download standard layout XML"
                       >
                         <Download className="h-3 w-3" />
-                        Export .drawio
+                        Export
                       </button>
                     )}
                   </div>
@@ -2736,6 +2827,33 @@ export default function Home() {
                       </button>
                     </div>
 
+                    {/* GitHub Push */}
+                    <div className="bg-gradient-to-br from-[#d4ff00]/5 to-transparent border border-[#d4ff00]/20 hover:border-[#d4ff00]/40 transition p-5 rounded-2xl flex flex-col justify-between space-y-4 md:col-span-2">
+                      <div className="flex items-start gap-4">
+                        <div className="h-10 w-10 rounded-full bg-[#d4ff00]/15 text-[#d4ff00] border border-[#d4ff00]/30 flex items-center justify-center flex-shrink-0">
+                          <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                          </svg>
+                        </div>
+                        <div className="space-y-1.5 flex-1">
+                          <h4 className="text-xs font-bold text-[#F0F0F0]">Push to GitHub Repository</h4>
+                          <p className="text-[11px] text-[#999999] leading-relaxed">
+                            Export your diagram directly to a GitHub repository. Supports .drawio, .svg, and .mmd formats. Requires a GitHub Personal Access Token with repo permissions.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={openGithubModal}
+                        disabled={!drawioXML && !canvasSvg && !mermaidCode}
+                        className="w-full py-2.5 bg-[#d4ff00]/10 hover:bg-[#d4ff00]/20 disabled:opacity-40 text-xs font-bold text-[#d4ff00] rounded-xl border border-[#d4ff00]/30 cursor-pointer transition flex items-center justify-center gap-2"
+                      >
+                        <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                        </svg>
+                        Push to GitHub
+                      </button>
+                    </div>
+
                   </div>
                 </div>
               </motion.div>
@@ -2766,6 +2884,173 @@ export default function Home() {
               )}
               <span className="text-xs font-semibold">{toast.message}</span>
             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* GitHub Push Modal */}
+      <AnimatePresence>
+        {githubModalOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            onClick={() => setGithubModalOpen(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-[#0d0d0d] border border-white/10 rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Modal Header */}
+              <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="h-8 w-8 rounded-full bg-[#d4ff00]/10 text-[#d4ff00] border border-[#d4ff00]/20 flex items-center justify-center">
+                    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                    </svg>
+                  </div>
+                  <h3 className="text-sm font-bold text-[#F0F0F0]">Push to GitHub</h3>
+                </div>
+                <button
+                  onClick={() => setGithubModalOpen(false)}
+                  className="p-1.5 hover:bg-white/5 rounded-lg transition cursor-pointer"
+                >
+                  <svg className="h-4 w-4 text-[#999999]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M18 6L6 18M6 6l12 12"/>
+                  </svg>
+                </button>
+              </div>
+
+              {/* Modal Body */}
+              <div className="p-6 space-y-4">
+                {/* Export Type Selection */}
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-[#999999] uppercase tracking-wider block">Export Format</label>
+                  <div className="grid grid-cols-3 gap-2 bg-white/5 p-1 rounded-xl">
+                    {[
+                      { id: "drawio", label: "Draw.io", ext: ".drawio" },
+                      { id: "svg", label: "SVG", ext: ".svg" },
+                      { id: "mermaid", label: "Mermaid", ext: ".mmd" }
+                    ].map((opt) => (
+                      <button
+                        key={opt.id}
+                        onClick={() => {
+                          setGithubExportType(opt.id as any);
+                          setGithubPath(prev => {
+                            const basePath = prev.replace(/\.(drawio|svg|mmd)$/, "");
+                            return `${basePath}${opt.ext}`;
+                          });
+                        }}
+                        className={`py-2 text-[10px] font-semibold rounded-lg transition-all cursor-pointer ${
+                          githubExportType === opt.id
+                            ? "bg-[#d4ff00]/15 text-[#d4ff00] border border-[#d4ff00]/25"
+                            : "text-[#999999] hover:text-[#F0F0F0] border border-transparent"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Repository Owner */}
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-[#999999] uppercase tracking-wider block">Repository Owner</label>
+                  <input
+                    type="text"
+                    value={githubOwner}
+                    onChange={(e) => setGithubOwner(e.target.value)}
+                    placeholder="e.g. your-username"
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-[#F0F0F0] placeholder-[#999999]/40 focus:outline-none focus:border-[#d4ff00] transition"
+                  />
+                </div>
+
+                {/* Repository Name */}
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-[#999999] uppercase tracking-wider block">Repository Name</label>
+                  <input
+                    type="text"
+                    value={githubRepo}
+                    onChange={(e) => setGithubRepo(e.target.value)}
+                    placeholder="e.g. architecture-docs"
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-[#F0F0F0] placeholder-[#999999]/40 focus:outline-none focus:border-[#d4ff00] transition"
+                  />
+                </div>
+
+                {/* Branch */}
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-[#999999] uppercase tracking-wider block">Branch</label>
+                  <input
+                    type="text"
+                    value={githubBranch}
+                    onChange={(e) => setGithubBranch(e.target.value)}
+                    placeholder="main"
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-[#F0F0F0] placeholder-[#999999]/40 focus:outline-none focus:border-[#d4ff00] transition"
+                  />
+                </div>
+
+                {/* File Path */}
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-[#999999] uppercase tracking-wider block">File Path</label>
+                  <input
+                    type="text"
+                    value={githubPath}
+                    onChange={(e) => setGithubPath(e.target.value)}
+                    placeholder="diagrams/architecture.drawio"
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-[#F0F0F0] placeholder-[#999999]/40 focus:outline-none focus:border-[#d4ff00] transition"
+                  />
+                </div>
+
+                {/* Commit Message */}
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-[#999999] uppercase tracking-wider block">Commit Message (optional)</label>
+                  <input
+                    type="text"
+                    value={githubCommitMessage}
+                    onChange={(e) => setGithubCommitMessage(e.target.value)}
+                    placeholder={`Update diagram: ${lastBlueprint?.title || "Architecture"}`}
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-[#F0F0F0] placeholder-[#999999]/40 focus:outline-none focus:border-[#d4ff00] transition"
+                  />
+                </div>
+
+                <div className="text-[10px] text-[#999999]/60 bg-white/5 border border-white/5 rounded-lg p-2">
+                  <strong>Note:</strong> Requires GITHUB_TOKEN environment variable with repo permissions.
+                </div>
+              </div>
+
+              {/* Modal Footer */}
+              <div className="px-6 py-4 border-t border-white/10 flex justify-end gap-2">
+                <button
+                  onClick={() => setGithubModalOpen(false)}
+                  className="px-4 py-2 text-xs font-semibold text-[#999999] hover:text-[#F0F0F0] border border-white/10 hover:border-white/20 rounded-lg transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleGithubPush}
+                  disabled={githubPushing || !githubOwner.trim() || !githubRepo.trim()}
+                  className="px-5 py-2 bg-[#d4ff00] hover:bg-[#e5ff4d] text-black text-xs font-bold rounded-lg transition flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  {githubPushing ? (
+                    <>
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      Pushing...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                      </svg>
+                      Push to GitHub
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>

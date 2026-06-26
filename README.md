@@ -13,12 +13,14 @@ ArchPrompt is a production-quality, enterprise-grade systems design and architec
 | 🤖 **3-Stage AI Pipeline** | Parse → Mermaid Compile → Draw.io Compile |
 | 🗺️ **12 Diagram Types** | Flowcharts, C4, Sequence, ER, Class, State, Gantt, Timeline, Mindmap, Quadrant |
 | 🖊️ **Live draw.io Editor** | Native embedded diagrams.net with full edit/export support |
+| 🔄 **Bidirectional Sync** | Edit in Draw.io and sync changes back to Mermaid canvas |
 | 🔎 **Pan & Zoom Canvas** | Mouse wheel zoom, drag-to-pan, auto-fit, and center controls |
 | 🧠 **AI Co-pilot Refinement** | Natural language patch instructions that re-run the pipeline |
 | 📁 **File Upload Support** | Attach `.txt`, `.json`, `.yaml`, `.md`, `.csv` as prompt context |
 | 🕐 **Session History** | LocalStorage-persisted, recall and re-render any previous diagram |
 | 🛠️ **Blueprint Inspector** | View and edit the structural JSON node/edge graph live |
 | 📤 **Multi-format Export** | SVG, transparent PNG (2×), `.drawio`, `.mmd` raw source |
+| 🔐 **GitHub Export** | Push diagrams directly to GitHub repositories |
 | 🔒 **Robust Sanitization** | Multi-pass, quote-boundary-aware Mermaid statement splitter |
 | ⚡ **Compiler Method Selector** | Visual (SVG-coordinate), Deterministic, or Gemini AI draw.io compilation |
 
@@ -110,8 +112,8 @@ Converts blueprint JSON into Mermaid v10 syntax. The system prompt enforces:
 
 | Method | Description |
 |---|---|
-| **Visual** (default) | Parses rendered Mermaid SVG screen coordinates → maps to absolute `mxGeometry` for pixel-perfect parity |
-| **Deterministic** | Pure TypeScript geometry engine in `lib/drawioCompiler.ts`, no AI, no network calls |
+| **Deterministic** (default) | Pure TypeScript geometry engine in `lib/drawioCompiler.ts`, creates fully editable shapes with proper layout, no AI, no network calls |
+| **Visual** | Parses rendered Mermaid SVG screen coordinates → maps to absolute `mxGeometry` for pixel-perfect visual parity |
 | **Gemini AI** | Blueprint sent to Gemini with full `buildDrawioCompilerPrompt()` mxGraph style instructions |
 
 ---
@@ -272,7 +274,9 @@ All text responses pass through `sanitizeContent()` (multi-pass) before returnin
 ```
 ArchPrompt/
 ├── app/
-│   ├── api/generate/route.ts    ← 3-stage LLM pipeline API endpoint
+│   ├── api/
+│   │   ├── generate/route.ts    ← 3-stage LLM pipeline API endpoint
+│   │   └── github-push/route.ts ← GitHub repository export endpoint
 │   ├── globals.css              ← Design tokens, dark-mode theme, animations
 │   ├── layout.tsx               ← App layout and font integration
 │   └── page.tsx                 ← Full studio UI (~2,700 lines)
@@ -297,6 +301,7 @@ ArchPrompt/
 
 - Node.js 18+
 - A Google Gemini API key ([get one at AI Studio](https://aistudio.google.com/apikey))
+- (Optional) A GitHub Personal Access Token for diagram export to repositories
 
 ### Installation
 
@@ -315,7 +320,47 @@ npm run dev
 ```env
 # Required — only ever used server-side, never exposed to the browser
 GEMINI_API_KEY="your-gemini-api-key"
+
+# Optional — for GitHub export functionality
+GITHUB_TOKEN="your-github-pat-with-repo-permissions"
 ```
+
+---
+
+## 🔄 Bidirectional Sync
+
+ArchPrompt supports bidirectional synchronization between the Mermaid canvas and the Draw.io editor:
+
+### Canvas to Draw.io
+- When you generate a diagram, it automatically loads into the Draw.io editor
+- The **Deterministic** compiler method (now default) creates editable, selectable shapes with proper layout
+- Switch between Visual (pixel-perfect), Deterministic (editable), or Gemini AI methods
+
+### Draw.io to Canvas
+1. Edit your diagram in the Draw.io Editor tab
+2. Click **Sync to Canvas** button in the toolbar
+3. The updated diagram renders back to the Mermaid canvas preview
+
+This allows you to:
+- Start with AI-generated architecture
+- Refine using Draw.io's visual tools
+- See changes reflected in both views
+
+---
+
+## 📤 GitHub Export
+
+Push diagrams directly to your GitHub repositories:
+
+1. Generate or edit a diagram
+2. Click **GitHub** button in the canvas or export panel
+3. Select format: Draw.io (.drawio), SVG, or Mermaid (.mmd)
+4. Enter repository owner, name, branch, and file path
+5. Click **Push to GitHub**
+
+**Requirements:**
+- `GITHUB_TOKEN` environment variable with repo permissions
+- Valid GitHub repository (create one if needed)
 
 ---
 
