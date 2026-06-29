@@ -84,9 +84,9 @@ Strict rules:
 2. The very first non-empty line of the output MUST be the valid Mermaid diagram declaration for the requested diagram type.
 3. Every node ID must strictly match [a-zA-Z][a-zA-Z0-9_]*.
 4. Ensure all syntax elements are fully compliant with Mermaid v10 definitions.
-5. CRITICAL STATEMENT SPACING RULE:
-   Each statement, keyword, boundary block start/end, relationship, title, and direction declaration MUST be on its own separate newline.
-   You must NEVER combine or squash multiple statements onto a single line (for example, NEVER write "title Platformdirection TD" or "direction TDPerson(...)").
+5. Always place a newline after the diagram type/direction declaration (e.g., flowchart TD, graph TD, etc.) before the first node or statement.
+6. Always wrap node labels containing spaces or special characters in double quotes (e.g. A("Microservices Platform")).
+7. Each node, edge, and declaration must occupy its own separate line. Never concatenate or squash multiple statements on a single line (e.g., NEVER write "title Platformdirection TD" or "direction TDPerson(...)").
 
 GUIDELINES BY KIND:
 - flowchart:
@@ -330,21 +330,35 @@ function sanitizeContent(text: string): string {
       }
 
 
-      // Special: direction TD/LR/TB/BT/RL — two passes:
-      //  1. Ensure direction starts on its own line (split before it)
-      //  2. Ensure NOTHING follows the direction value on the same line
-      //     (e.g. "direction TDSystem_Boundary" → "direction TD\nSystem_Boundary")
-      seg = seg.replace(/([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
-      seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))(\S)/gi, "$1\n$2");
+      // Special: direction TD/LR/TB/BT/RL — three passes:
+      //  1a. Split any word-char IMMEDIATELY before `direction` (e.g. Platformdirection → Platform\ndirection).
+      //      Uses \w instead of [^\n] so it fires even when direction is squashed mid-word.
+      //  1b. Also split non-word, non-newline chars before direction (e.g. )direction → )\ndirection).
+      //  2.  Split any word-char IMMEDIATELY after the direction value (e.g. direction TDSystem_ → direction TD\nSystem_).
+      //  3.  Handle direction with NO space before the value (e.g. directionTD → direction TD).
+      seg = seg.replace(/(\w)(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+      seg = seg.replace(/([^\n\w])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+      seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))(\w)/gi, "$1\n$2");
+      seg = seg.replace(/(direction)(TD|LR|TB|BT|RL)/gi, "$1 $2");
 
 
-      // Category 3 — plain keywords: negative lookbehind (?<!\w) instead of
-      // \b so we correctly split word-char→keyword (e.g. "Platformtitle").
-      // NOTE: subgraph/end are intentionally excluded — they live in Cat 4.
+      // Category 3 — plain keywords.
+      // Two passes per keyword because a single lookbehind cannot handle
+      // the word-char→keyword squash (e.g. "externaltitle" or "Platformclass"):
+      //  Pass A: use (\w) to catch word-char immediately before the keyword.
+      //          No lookbehind needed — if it's preceded by a word char it MUST split.
+      //  Pass B: use ([^\n]) + (?<![\w]) for non-word, non-newline chars (original logic).
+      // NOTE: the trailing (?:\s+|:|(?=\s*$)) ensures we only match standalone
+      //       keywords — "classDef" won't incorrectly split "class" because
+      //       "D" is not whitespace/colon/end-of-line.
       for (const kw of PLAIN_KEYWORDS) {
         const escaped = kw.replace(/[-]/g, "\\-");
-        const regex = new RegExp(`([^\\n])((?<![\\w])${escaped}(?:\\s+|:|(?=\\s*$)))`, "g");
-        seg = seg.replace(regex, "$1\n$2");
+        // Pass A: word-char → keyword (lookbehind would block this case)
+        const wordBeforeRegex = new RegExp(`(\\w)(${escaped}(?:\\s+|:|(?=\\s*$)))`, "g");
+        seg = seg.replace(wordBeforeRegex, "$1\n$2");
+        // Pass B: non-word non-newline → keyword (original lookbehind logic)
+        const nonWordRegex = new RegExp(`([^\\n])((?<![\\w])${escaped}(?:\\s+|:|(?=\\s*$)))`, "g");
+        seg = seg.replace(nonWordRegex, "$1\n$2");
       }
 
       segments[i] = seg;
@@ -365,10 +379,17 @@ function sanitizeContent(text: string): string {
   // Targets squash patterns that survive the quote-aware loop, such as a
   // flowchart declaration merged directly against a subgraph statement.
 
+  // 0. direction keyword squashed with surrounding word characters — full-string
+  //    safety net that catches any case the per-segment loop may have missed
+  //    (e.g. inside an odd-split quoted segment, or zero-space directionTD).
+  const DIR = "(?:TD|LR|TB|BT|RL)";
+  clean = clean.replace(new RegExp(`(\\w)(direction\\s+${DIR})`, "gi"), "$1\n$2");
+  clean = clean.replace(new RegExp(`(direction\\s+${DIR})(\\w)`, "gi"), "$1\n$2");
+  clean = clean.replace(new RegExp(`(direction)(${DIR})`, "gi"), "$1 $2");
+
   // 1. flowchart/graph + direction squashed against subgraph / end.
   //    Use explicit direction alternation instead of \w+ so "TD" isn't
   //    consumed together with the following keyword as one token.
-  const DIR = "(?:TD|LR|TB|BT|RL)";
   clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(subgraph)`, "gi"), "$1\n$2");
   clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(graph)`,    "gi"), "$1\n$2");
   clean = clean.replace(new RegExp(`(graph\\s+${DIR})(subgraph)`,     "gi"), "$1\n$2");

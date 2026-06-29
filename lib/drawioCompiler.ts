@@ -1,10 +1,10 @@
-/**
- * Deterministic Topological Geometry Parser for Draw.io (mxGraph XML)
- * Converts structural blueprint JSON directly into valid, pristine, non-overlapping
- * and beautifully spaced native draw.io XML on a dark enterprise-grid canvas.
- */
+import { resolveLogoForNode, LogoEntry } from "./logoRegistry";
 
-export function compileBlueprintToDrawio(blueprint: any, renderedSvg?: string): string {
+export function compileBlueprintToDrawio(
+  blueprint: any,
+  renderedSvg?: string,
+  logoOverrides?: Record<string, LogoEntry>
+): string {
   if (!blueprint) return "";
 
   const title = blueprint.title || "Architecture Diagram";
@@ -24,7 +24,7 @@ export function compileBlueprintToDrawio(blueprint: any, renderedSvg?: string): 
     person: { fill: "#0c1524", stroke: "#3b82f6", width: 1.5 },
   };
 
-  function getNodeStyle(type: string, shape: string): string {
+  function getNodeStyle(type: string, shape: string, logoPath?: string): string {
     const colors = baseColors[type] || baseColors.service;
     let styleParts = [
       "whiteSpace=wrap",
@@ -49,6 +49,10 @@ export function compileBlueprintToDrawio(blueprint: any, renderedSvg?: string): 
       styleParts.push("rounded=1", "arcSize=50");
     } else {
       styleParts.push("rounded=1");
+    }
+
+    if (logoPath) {
+      styleParts.push(`image;image=${logoPath}`, "imageAlign=left", "imageVerticalAlign=top", "imageWidth=20", "imageHeight=20");
     }
 
     return styleParts.join(";");
@@ -416,7 +420,8 @@ export function compileBlueprintToDrawio(blueprint: any, renderedSvg?: string): 
 
       const layoutPos = nodeLayoutPositions[node.id] || { rx: paddingL, ry: paddingT, w: nodeW, h: nodeH };
       const nLabel = escapeXml(node.label);
-      const nStyle = getNodeStyle(node.type || "service", node.shape || "rect");
+      const logo = logoOverrides?.[node.id] ?? resolveLogoForNode(node.label ?? "");
+      const nStyle = getNodeStyle(node.type || "service", node.shape || "rect", logo?.path);
 
       xml += `        <mxCell id="${nodeCellId}" value="${nLabel}" style="${nStyle}" vertex="1" parent="${groupCellId}">\n`;
       xml += `          <mxGeometry x="${layoutPos.rx}" y="${layoutPos.ry}" width="${layoutPos.w}" height="${layoutPos.h}" as="geometry"/>\n`;

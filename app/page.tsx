@@ -4,7 +4,25 @@ import React, { useState, useEffect, useRef } from "react";
 import Script from "next/script";
 import { motion, AnimatePresence } from "motion/react";
 import { compileBlueprintToDrawio } from "../lib/drawioCompiler";
-import { Sparkles, Layers, Code, FileText, Download, Play, RotateCcw, Maximize2, CreditCard as Edit3, Settings, History, TriangleAlert as AlertTriangle, RefreshCw, Copy, Check, Eye, ChevronRight, Database, Image as ImageIcon, FolderTree, MapPin, Clock, ExternalLink, BookOpen, Compass, Paperclip, Trash2 } from "lucide-react";
+import { Sparkles, Layers, Code, FileText, Download, Play, RotateCcw, Maximize2, CreditCard as Edit3, Settings, History, TriangleAlert as AlertTriangle, RefreshCw, Copy, Check, Eye, ChevronRight, Database, Image as ImageIcon, FolderTree, MapPin, Clock, ExternalLink, BookOpen, Compass, Paperclip, Trash2, Plus } from "lucide-react";
+import ProjectBrowser from "../components/ProjectBrowser";
+import { getProject, Project } from "../lib/store/projectStore";
+import { getWorkspace } from "../lib/store/workspaceStore";
+import { Application, listApplications, saveApplication, deleteApplication, getApplication } from "../lib/store/applicationStore";
+import { mergeBlueprint } from "../lib/merger/blueprintMerger";
+import { mergeDrawio } from "../lib/merger/drawioMerger";
+// ── LOGO SYSTEM: imports ─────────────────────────────────────────────────────
+import {
+  LogoEntry,
+  LogoCategory,
+  resolveLogoForNode,
+  resolveLogoById,
+  listByCategory,
+  listAllCategories,
+  searchLogos,
+} from "../lib/logoRegistry";
+// ── END LOGO SYSTEM: imports ─────────────────────────────────────────────────
+
 
 // ----------------------------------------------------
 // LOCAL STORAGE HISTORY KEY
@@ -46,10 +64,156 @@ interface HistoryEntry {
   ts: string;
 }
 
+// ── LOGO SYSTEM: resolveAllNodeLogos ─────────────────────────────────────────
+function resolveAllNodeLogos(
+  blueprint: any | null,
+  overrides: Record<string, string>
+): Record<string, LogoEntry> {
+  if (!blueprint) return {};
+  const result: Record<string, LogoEntry> = {};
+  const allNodes = blueprint.groups?.flatMap((g: any) => g.nodes || []) ?? [];
+  allNodes.forEach((node: any) => {
+    const manualId = overrides[node.id];
+    if (manualId) {
+      const entry = resolveLogoById(manualId);
+      if (entry) result[node.id] = entry;
+    } else {
+      const auto = resolveLogoForNode(node.label ?? "");
+      if (auto) result[node.id] = auto;
+    }
+  });
+  return result;
+}
+// ── LOGO SYSTEM: overlayLogosOnMermaidSvg ────────────────────────────────────
+function overlayLogosOnMermaidSvg(
+  svgElement: SVGSVGElement,
+  resolvedLogos: Record<string, LogoEntry>
+): void {
+  try {
+    Object.entries(resolvedLogos).forEach(([nodeId, logo]) => {
+      // Try multiple selector strategies to locate the node element
+      const candidates = [
+        svgElement.querySelector(`#${nodeId}`),
+        svgElement.querySelector(`#flowchart-${nodeId}-0`),
+        svgElement.querySelector(`[id*="${nodeId}"]`),
+      ].filter(Boolean) as SVGGraphicsElement[];
+
+      const nodeEl = candidates[0];
+      if (!nodeEl) return;
+
+      // Remove any previously inserted logo for this node (re-render safety)
+      nodeEl.querySelectorAll(".archprompt-logo-badge").forEach((el) => el.remove());
+
+      // Safe getBBox call
+      let bbox;
+      try {
+        bbox = nodeEl.getBBox();
+      } catch {
+        return;
+      }
+      if (!bbox || bbox.width === 0) return;
+
+      // Badge background — rounded rect in top-left corner of the node
+      const BADGE_SIZE = 20;
+      const BADGE_PAD = 4;
+      const bx = bbox.x + BADGE_PAD;
+      const by = bbox.y + BADGE_PAD;
+
+      const badgeGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      badgeGroup.setAttribute("class", "archprompt-logo-badge");
+      badgeGroup.setAttribute("pointer-events", "none");
+
+      const bg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      bg.setAttribute("x", String(bx));
+      bg.setAttribute("y", String(by));
+      bg.setAttribute("width", String(BADGE_SIZE));
+      bg.setAttribute("height", String(BADGE_SIZE));
+      bg.setAttribute("rx", "4");
+      bg.setAttribute("fill", logo.brandColor);
+      bg.setAttribute("opacity", "0.9");
+
+      const img = document.createElementNS("http://www.w3.org/2000/svg", "image");
+      img.setAttribute("href", logo.path);
+      img.setAttribute("x", String(bx + 2));
+      img.setAttribute("y", String(by + 2));
+      img.setAttribute("width", String(BADGE_SIZE - 4));
+      img.setAttribute("height", String(BADGE_SIZE - 4));
+      img.setAttribute("preserveAspectRatio", "xMidYMid meet");
+
+      badgeGroup.appendChild(bg);
+      badgeGroup.appendChild(img);
+      nodeEl.appendChild(badgeGroup);
+    });
+  } catch (err) {
+    console.warn("Error overlaying logos on Mermaid SVG:", err);
+  }
+}
+// ── END LOGO SYSTEM: overlayLogosOnMermaidSvg ────────────────────────────────
+
+// ── LOGO SYSTEM: inlineLogoImagesForExport ───────────────────────────────────
+async function inlineLogoImagesForExport(svgElement: SVGSVGElement): Promise<void> {
+  const images = Array.from(
+    svgElement.querySelectorAll("image.archprompt-logo-badge image, .archprompt-logo-badge image")
+  ) as SVGImageElement[];
+
+  await Promise.all(
+    images.map(async (img) => {
+      const href = img.getAttribute("href") ?? "";
+      if (!href || href.startsWith("data:")) return; // already inlined
+
+      try {
+        const resp = await fetch(href);
+        if (!resp.ok) throw new Error();
+        const blob = await resp.blob();
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+        img.setAttribute("href", base64);
+      } catch {
+        // If fetch fails, remove the image rather than tainting the canvas
+        img.closest(".archprompt-logo-badge")?.remove();
+      }
+    })
+  );
+}
+// ── END LOGO SYSTEM: inlineLogoImagesForExport ──────────────────────────────
+
+// ── LOGO SYSTEM: extractNodeIdFromElement ────────────────────────────────────
+function extractNodeIdFromElement(nodeEl: SVGGraphicsElement, allNodes: any[]): string | null {
+  try {
+    const idAttr = nodeEl.getAttribute("id") || "";
+    for (const node of allNodes) {
+      if (
+        idAttr === node.id ||
+        idAttr.startsWith(`flowchart-${node.id}-`) ||
+        idAttr.includes(`-${node.id}-`) ||
+        idAttr.endsWith(`-${node.id}`)
+      ) {
+        return node.id;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+// ── END LOGO SYSTEM: extractNodeIdFromElement ────────────────────────────────
+
 export default function Home() {
   // ----------------------------------------------------
   // APPLICATION STATE
   // ----------------------------------------------------
+  // ── REPO SYSTEM: Phase 2 ──
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [activeApplicationId, setActiveApplicationId] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  const [activeProject, setActiveProject] = useState<Project | null>(null);
+  const [applications, setApplications] = useState<Application[]>([]);
+  // ── END REPO SYSTEM: Phase 2 ──
+
   const [diagramType, setDiagramType] = useState<string>("auto");
   const [compilerMethod, setCompilerMethod] = useState<"visual" | "deterministic" | "gemini">("deterministic");
   const [promptInput, setPromptInput] = useState<string>("");
@@ -95,6 +259,13 @@ export default function Home() {
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedJson, setCopiedJson] = useState(false);
 
+  // ── REPO SYSTEM: Phase 4 ──
+  const [saveModalOpen, setSaveModalOpen] = useState(false);
+  const [saveAppName, setSaveAppName] = useState("");
+  const [saveAppVersion, setSaveAppVersion] = useState("1.0.0");
+  const [saveAppTags, setSaveAppTags] = useState("");
+  // ── END REPO SYSTEM: Phase 4 ──
+
   // AI Co-pilot Refinement State
   const [copilotPrompt, setCopilotPrompt] = useState<string>("");
   const [copilotLoading, setCopilotLoading] = useState<boolean>(false);
@@ -107,8 +278,32 @@ export default function Home() {
   } | null>(null);
 
   // Interactive Customizer Panel States
-  const [rightPanelTab, setRightPanelTab] = useState<"inspector" | "diagnostics">("inspector");
+  const [rightPanelTab, setRightPanelTab] = useState<"inspector" | "diagnostics" | "references" | "logos">("inspector");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  // ── REPO SYSTEM: Phase 8 ──
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
+  // ── END REPO SYSTEM: Phase 8 ──
+
+  // ── LOGO SYSTEM: state ───────────────────────────────────────────────────
+  // key = blueprint node id, value = LogoEntry.id (manual override)
+  const [logoOverrides, setLogoOverrides] = useState<Record<string, string>>({});
+  // node id that the logo browser should pre-select for assignment
+  const [logoAssignTarget, setLogoAssignTarget] = useState<string | null>(null);
+  // search query for the logo browser panel
+  const [logoBrowserQuery, setLogoBrowserQuery] = useState<string>("");
+  // which category sections are collapsed in the logo browser
+  const [collapsedLogoCategories, setCollapsedLogoCategories] = useState<Set<string>>(new Set());
+  // popover state: which logo tile is showing assignment dropdown
+  const [logoPopoverEntry, setLogoPopoverEntry] = useState<LogoEntry | null>(null);
+  const [logoPopoverNodeTarget, setLogoPopoverNodeTarget] = useState<string>("");
+  // ── END LOGO SYSTEM: state ────────────────────────────────────────────────
+
+  // ── LOGO SYSTEM: derived state ───────────────────────────────────────────
+  const resolvedLogos = React.useMemo(
+    () => resolveAllNodeLogos(lastBlueprint, logoOverrides),
+    [lastBlueprint, logoOverrides]
+  );
+  // ── END LOGO SYSTEM: derived state ────────────────────────────────────────
 
   // Derived selected target node for properties inspector to prevent render ref access errors
   const activeSelectedTargetNode = (() => {
@@ -201,6 +396,24 @@ export default function Home() {
     }
   };
 
+  // ── REPO SYSTEM: Phase 3 ──
+  const refreshApplications = (projId: string) => {
+    const list = listApplications(projId);
+    setApplications(list);
+  };
+
+  useEffect(() => {
+    if (activeProjectId) {
+      const proj = getProject(activeProjectId);
+      setActiveProject(proj);
+      refreshApplications(activeProjectId);
+    } else {
+      setActiveProject(null);
+      setApplications([]);
+    }
+  }, [activeProjectId]);
+  // ── END REPO SYSTEM: Phase 3 ──
+
   // ----------------------------------------------------
   // INITIAL BOOTSTRAP / LOAD HISTORY
   // ----------------------------------------------------
@@ -221,6 +434,92 @@ export default function Home() {
       console.error("Failed loading search history", e);
     }
   }, []);
+
+  // ── LOGO SYSTEM: session restore + assign helpers ────────────────────────
+  useEffect(() => {
+    const saved = sessionStorage.getItem("archprompt_logo_overrides");
+    if (saved) {
+      try {
+        setLogoOverrides(JSON.parse(saved));
+      } catch {
+        // ignore corrupt storage
+      }
+    }
+  }, []);
+
+  const assignLogo = (nodeId: string, logoId: string) => {
+    setLogoOverrides((prev) => {
+      const next = { ...prev, [nodeId]: logoId };
+      sessionStorage.setItem("archprompt_logo_overrides", JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const clearLogoOverride = (nodeId: string) => {
+    setLogoOverrides((prev) => {
+      const next = { ...prev };
+      delete next[nodeId];
+      sessionStorage.setItem("archprompt_logo_overrides", JSON.stringify(next));
+      return next;
+    });
+  };
+  // ── END LOGO SYSTEM: session restore + assign helpers ─────────────────────
+
+  // ── LOGO SYSTEM: overlay effect ──────────────────────────────────────────
+  useEffect(() => {
+    if (!canvasSvg || typeof window === "undefined" || !containerRef.current) return;
+    const svgEl = containerRef.current.querySelector("svg");
+    if (!svgEl) return;
+
+    overlayLogosOnMermaidSvg(svgEl, resolvedLogos);
+
+    // ── LOGO SYSTEM: attach node click listeners ─────────────────────────────
+    try {
+      const allNodeElements = Array.from(
+        svgEl.querySelectorAll("g.node, g.mermaid-node, [class*=\"node\"]")
+      ) as SVGGraphicsElement[];
+
+      const allNodes = lastBlueprint?.groups?.flatMap((g: any) => g.nodes || []) || [];
+
+      allNodeElements.forEach((nodeEl) => {
+        const nodeId = extractNodeIdFromElement(nodeEl, allNodes);
+        if (!nodeId) return;
+
+        // Skip internal/external reference proxy nodes to prevent breaking expand/collapse click features
+        const matchedNode = allNodes.find((n: any) => n.id === nodeId);
+        if (matchedNode?.type === "internal_ref" || matchedNode?.type === "external_ref") return;
+
+        nodeEl.style.cursor = "pointer";
+        const clickHandler = (e: MouseEvent) => {
+          if (e.ctrlKey || e.metaKey || e.button === 2) return;
+          e.stopPropagation();
+          setLogoAssignTarget(nodeId);
+          setRightPanelTab("logos");
+        };
+
+        nodeEl.addEventListener("click", clickHandler);
+      });
+    } catch (err) {
+      console.warn("Failed to attach node click listeners to SVG nodes:", err);
+    }
+    // ── END LOGO SYSTEM: attach node click listeners ──────────────────────────
+  }, [canvasSvg, resolvedLogos, lastBlueprint]);
+  // ── END LOGO SYSTEM: overlay effect ────────────────────────────────────────
+
+  // ── LOGO SYSTEM: auto-open popover on target change ─────────────────────
+  useEffect(() => {
+    if (logoAssignTarget) {
+      const resolved = resolvedLogos[logoAssignTarget];
+      if (resolved) {
+        setLogoPopoverEntry(resolved);
+        setLogoPopoverNodeTarget(logoAssignTarget);
+      } else {
+        setLogoPopoverEntry(null);
+        setLogoPopoverNodeTarget(logoAssignTarget);
+      }
+    }
+  }, [logoAssignTarget, resolvedLogos]);
+  // ── END LOGO SYSTEM: auto-open popover on target change ──────────────────
 
   useEffect(() => {
     // Set up message listener for draw.io iframe postMessages
@@ -285,6 +584,92 @@ export default function Home() {
     };
   }, [drawioXML, renderDrawioSVGInCanvas, triggerToast]);
 
+  // ── REPO SYSTEM: Phase 8 ──
+  useEffect(() => {
+    const handleCanvasClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      const nodeEl = target.closest(".node");
+      if (!nodeEl) return;
+
+      const allNodes = lastBlueprint?.groups?.flatMap((g: any) => g.nodes || []) || [];
+      const matchedNode = allNodes.find((n: any) => nodeEl.id.includes(n.id) || nodeEl.getAttribute("id")?.includes(n.id));
+
+      if (matchedNode && (matchedNode.type === "internal_ref" || matchedNode.type === "external_ref")) {
+        setContextMenu(null);
+        if (e.ctrlKey) {
+          e.preventDefault();
+          toggleProxyNodeExpansion(matchedNode.id);
+        }
+      }
+    };
+
+    const handleCanvasContextMenu = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      const nodeEl = target.closest(".node");
+      if (!nodeEl) return;
+
+      const allNodes = lastBlueprint?.groups?.flatMap((g: any) => g.nodes || []) || [];
+      const matchedNode = allNodes.find((n: any) => nodeEl.id.includes(n.id) || nodeEl.getAttribute("id")?.includes(n.id));
+
+      if (matchedNode && (matchedNode.type === "internal_ref" || matchedNode.type === "external_ref")) {
+        e.preventDefault();
+        if (containerRef.current) {
+          const rect = containerRef.current.getBoundingClientRect();
+          setContextMenu({
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top,
+            nodeId: matchedNode.id
+          });
+        }
+      }
+    };
+
+    const handleWindowClick = () => {
+      setContextMenu(null);
+    };
+
+    const el = containerRef.current;
+    if (el) {
+      el.addEventListener("click", handleCanvasClick);
+      el.addEventListener("contextmenu", handleCanvasContextMenu);
+    }
+    window.addEventListener("click", handleWindowClick);
+
+    return () => {
+      if (el) {
+        el.removeEventListener("click", handleCanvasClick);
+        el.removeEventListener("contextmenu", handleCanvasContextMenu);
+      }
+      window.removeEventListener("click", handleWindowClick);
+    };
+  }, [lastBlueprint, containerRef]);
+
+  const toggleProxyNodeExpansion = (nodeId: string) => {
+    if (!lastBlueprint) return;
+    const updated = { ...structuredClone(lastBlueprint) };
+    let toggled = false;
+
+    for (const g of updated.groups || []) {
+      if (g.nodes) {
+        for (const n of g.nodes) {
+          if (n.id === nodeId) {
+            n.expanded = !n.expanded;
+            toggled = true;
+            break;
+          }
+        }
+      }
+      if (toggled) break;
+    }
+
+    if (toggled) {
+      setLastBlueprint(updated);
+      compileBlueprintToDiagrams(updated);
+      triggerToast("Reference proxy view toggled! ✓", false);
+    }
+  };
+  // ── END REPO SYSTEM: Phase 8 ──
+
   // Sync to local storage
   const saveHistoryToLocalStorage = (newHistory: HistoryEntry[]) => {
     try {
@@ -294,10 +679,61 @@ export default function Home() {
     }
   };
 
+  // ── REPO SYSTEM: Phase 8 ──
+  const resolveBlueprintReferences = (blueprint: any): any => {
+    if (!blueprint) return null;
+    let resolved = structuredClone(blueprint);
+    let iterations = 0;
+    const maxIterations = 5;
+
+    while (iterations < maxIterations) {
+      let foundExpandedProxy = false;
+      let targetNode: any = null;
+
+      if (resolved.groups) {
+        for (const g of resolved.groups) {
+          if (g.nodes) {
+            for (const n of g.nodes) {
+              if ((n.type === "internal_ref" || n.type === "external_ref") && n.expanded) {
+                targetNode = n;
+                foundExpandedProxy = true;
+                break;
+              }
+            }
+          }
+          if (foundExpandedProxy) break;
+        }
+      }
+
+      if (!foundExpandedProxy || !targetNode) {
+        break;
+      }
+
+      const childApp = getApplication(targetNode.refAppId);
+      if (!childApp || !childApp.blueprint) {
+        targetNode.expanded = false;
+        continue;
+      }
+
+      resolved = mergeBlueprint(
+        resolved,
+        targetNode,
+        childApp.blueprint,
+        childApp.entryNodes || [],
+        childApp.exitNodes || []
+      );
+      iterations++;
+    }
+
+    return resolved;
+  };
+  // ── END REPO SYSTEM: Phase 8 ──
+
   // ----------------------------------------------------
   // REUSABLE DIAGRAM ENGINES PIEPELINE
   // ----------------------------------------------------
-  const compileBlueprintToDiagrams = async (targetBlueprint: any, promptToSave = "") => {
+  const compileBlueprintToDiagrams = async (rawBlueprint: any, promptToSave = "") => {
+    const targetBlueprint = resolveBlueprintReferences(rawBlueprint);
     setCanvasError(null);
     setDrawioError(null);
     setDrawioStatus("loading");
@@ -347,7 +783,7 @@ export default function Home() {
           } catch (localErr: any) {
             console.error("Visual compilation to drawio failed, falling back to deterministic...", localErr);
             try {
-              const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined);
+              const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
               drawioDataXML = xml;
               setDrawioXML(xml);
               setDrawioStatus("loaded");
@@ -364,7 +800,7 @@ export default function Home() {
           }
         } else {
           try {
-            const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined);
+            const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
             drawioDataXML = xml;
             setDrawioXML(xml);
             setDrawioStatus("loaded");
@@ -381,7 +817,7 @@ export default function Home() {
         }
       } else if (compilerMethod === "deterministic") {
         try {
-          const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined);
+          const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
           drawioDataXML = xml;
           setDrawioXML(xml);
           setDrawioStatus("loaded");
@@ -435,7 +871,7 @@ export default function Home() {
           }
         } else {
           try {
-            const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined);
+            const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
             drawioDataXML = xml;
             setDrawioXML(xml);
             setDrawioStatus("loaded");
@@ -460,7 +896,7 @@ export default function Home() {
           id: historyIdCounter,
           prompt: promptToSave,
           mermaidCode: code,
-          blueprint: targetBlueprint,
+          blueprint: rawBlueprint,
           drawioXML: drawioDataXML,
           ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
         };
@@ -950,22 +1386,34 @@ export default function Home() {
         }
 
 
-        // Special: direction TD/LR/TB/BT/RL — two passes:
-        //  1. Ensure direction starts on its own line (split before it)
-        //  2. Ensure NOTHING follows the direction value on the same line
-        //     (e.g. "direction TDSystem_Boundary" → "direction TD\nSystem_Boundary")
-        seg = seg.replace(/([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
-        seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))(\S)/gi, "$1\n$2");
+        // Special: direction TD/LR/TB/BT/RL — three passes:
+        //  1a. Split any word-char IMMEDIATELY before `direction` (e.g. Platformdirection → Platform\ndirection).
+        //      Uses \w instead of [^\n] so it fires even when direction is squashed mid-word.
+        //  1b. Also split non-word, non-newline chars before direction (e.g. )direction → )\ndirection).
+        //  2.  Split any word-char IMMEDIATELY after the direction value (e.g. direction TDSystem_ → direction TD\nSystem_).
+        //  3.  Handle direction with NO space before the value (e.g. directionTD → direction TD).
+        seg = seg.replace(/(\w)(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+        seg = seg.replace(/([^\n\w])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+        seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))(\w)/gi, "$1\n$2");
+        seg = seg.replace(/(direction)(TD|LR|TB|BT|RL)/gi, "$1 $2");
 
-        // Category 3 — plain keywords: use (?<![\w]) instead of \b so we
-        // correctly split word-char→keyword transitions (e.g. "Platformtitle").
-        // NOTE: subgraph/end are intentionally excluded — they live in Cat 4.
+        // Category 3 — plain keywords.
+        // Two passes per keyword because a single lookbehind cannot handle
+        // the word-char→keyword squash (e.g. "externaltitle" or "Platformclass"):
+        //  Pass A: use (\w) to catch word-char immediately before the keyword.
+        //          No lookbehind needed — if it's preceded by a word char it MUST split.
+        //  Pass B: use ([^\n]) + (?<![\w]) for non-word, non-newline chars (original logic).
+        // NOTE: the trailing (?:\s+|:|(?=\s*$)) ensures we only match standalone
+        //       keywords — "classDef" won't incorrectly split "class" because
+        //       "D" is not whitespace/colon/end-of-line.
         for (const kw of PLAIN_KEYWORDS) {
-          // Escape any special regex chars in the keyword (e.g. `-` in x-axis)
           const escaped = kw.replace(/[-]/g, "\\-");
-          // (?<![\w]) is a lookbehind: keyword must NOT be preceded by a word char
-          const regex = new RegExp(`([^\\n])((?<![\\w])${escaped}(?:\\s+|:|(?=\\s*$)))`, "g");
-          seg = seg.replace(regex, "$1\n$2");
+          // Pass A: word-char → keyword (lookbehind would block this case)
+          const wordBeforeRegex = new RegExp(`(\\w)(${escaped}(?:\\s+|:|(?=\\s*$)))`, "g");
+          seg = seg.replace(wordBeforeRegex, "$1\n$2");
+          // Pass B: non-word non-newline → keyword (original lookbehind logic)
+          const nonWordRegex = new RegExp(`([^\\n])((?<![\\w])${escaped}(?:\\s+|:|(?=\\s*$)))`, "g");
+          seg = seg.replace(nonWordRegex, "$1\n$2");
         }
 
         segments[i] = seg;
@@ -986,10 +1434,17 @@ export default function Home() {
     // These target specific squash patterns that survive unquoted-segment
     // processing: flowchart/graph declarations merged with the next statement.
 
+    // 0. direction keyword squashed with surrounding word characters — full-string
+    //    safety net that catches any case the per-segment loop may have missed
+    //    (e.g. inside an odd-split quoted segment, or zero-space directionTD).
+    const DIR = "(?:TD|LR|TB|BT|RL)";
+    clean = clean.replace(new RegExp(`(direction)(${DIR})`, "gi"), "$1 $2");
+    clean = clean.replace(new RegExp(`(\\w)(direction\\s+${DIR})`, "gi"), "$1\n$2");
+    clean = clean.replace(new RegExp(`(direction\\s+${DIR})(\\w)`, "gi"), "$1\n$2");
+
     // 1. flowchart/graph + direction squashed against subgraph / end / another graph keyword.
     //    IMPORTANT: use explicit direction alternation instead of \w+ so "TD" doesn't
     //    get swallowed together with the following keyword into one token.
-    const DIR = "(?:TD|LR|TB|BT|RL)";
     clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(subgraph)`, "gi"), "$1\n$2");
     clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(graph)`,    "gi"), "$1\n$2");
     clean = clean.replace(new RegExp(`(graph\\s+${DIR})(subgraph)`,     "gi"), "$1\n$2");
@@ -1001,8 +1456,33 @@ export default function Home() {
     clean = clean.replace(/(\bend\b)(flowchart)/gi,        "$1\n$2");
     clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(end\\b)`, "gi"), "$1\n$2");
 
-    // LAYOUT_WITH_LEGEND always on its own line
+     // LAYOUT_WITH_LEGEND always on its own line
     clean = clean.replace(/\s*LAYOUT_WITH_LEGEND(\(\))?\s*/gi, "\nLAYOUT_WITH_LEGEND()\n");
+
+    // ── DEFENSIVE REPARSING PASSES ──────────────────────────────────────────
+    // Ensure newline after graph/flowchart direction line
+    clean = clean.replace(/((?:graph|flowchart)\s+(?:TD|LR|RL|BT|TB))\s*(?!\n)/g, '$1\n');
+    // Ensure newline after subgraph declarations
+    clean = clean.replace(/(subgraph\s+[^\n]+)\s*(?!\n)/g, '$1\n');
+
+    // Wrap bare node labels containing spaces/special chars in quotes
+    // e.g. A(My Service) -> A("My Service")
+    clean = clean.replace(
+      /(\w[\w-]*)\(([^")(]+)\)/g,
+      (match, id, label) =>
+        label.includes(' ') || /[^a-zA-Z0-9]/.test(label)
+          ? `${id}("${label}")`
+          : match
+    );
+    // e.g. A[My Service] -> A["My Service"]
+    clean = clean.replace(
+      /(\w[\w-]*)\[([^"\]]+)\]/g,
+      (match, id, label) =>
+        label.includes(' ') || /[^a-zA-Z0-9]/.test(label)
+          ? `${id}["${label}"]`
+          : match
+    );
+    // ────────────────────────────────────────────────────────────────────────
 
     // Collapse excessive blank lines
     clean = clean.replace(/\n{3,}/g, "\n\n");
@@ -1297,7 +1777,7 @@ export default function Home() {
           throw new Error("SVG content not found for Visual parity compiler.");
         }
       } else if (compilerMethod === "deterministic") {
-        const xml = compileBlueprintToDrawio(lastBlueprint, canvasSvg || undefined);
+        const xml = compileBlueprintToDrawio(lastBlueprint, canvasSvg || undefined, resolvedLogos);
         setDrawioXML(xml);
         setDrawioStatus("loaded");
         if (drawioReady) {
@@ -1341,6 +1821,172 @@ export default function Home() {
     }
   }, [compilerMethod]);
 
+  // ── REPO SYSTEM: Phase 3 ──
+  const handleLoadApplication = async (app: Application) => {
+    setActiveApplicationId(app.id);
+    setLastBlueprint(app.blueprint);
+    setMermaidCode(app.mermaidCode);
+    setDrawioXML(app.drawioXML);
+    setCanvasError(null);
+    setDrawioError(null);
+    setPromptInput("");
+
+    await renderMermaidMarkup(app.mermaidCode);
+
+    if (app.drawioXML) {
+      setDrawioStatus("loaded");
+      // Load iframe if ready, otherwise wait for messages init
+      iframeRef.current?.contentWindow?.postMessage(
+        JSON.stringify({ action: "load", xml: app.drawioXML, autosave: 1 }),
+        "*"
+      );
+    } else {
+      setDrawioStatus("empty");
+    }
+    setActiveTab("diagram");
+    triggerToast(`Loaded diagram: ${app.name} ✓`, false);
+  };
+
+  const handleNewDiagram = () => {
+    setActiveApplicationId(null);
+    setLastBlueprint(null);
+    setMermaidCode("");
+    setCanvasSvg("");
+    setDrawioXML(null);
+    setCanvasError(null);
+    setDrawioError(null);
+    setDrawioStatus("empty");
+    setPromptInput("");
+    triggerToast("Workspace cleared. Ready for a new design!", false);
+  };
+  // ── END REPO SYSTEM: Phase 3 ──
+
+  // ── REPO SYSTEM: Phase 4 ──
+  const handleOpenSaveModal = () => {
+    if (activeApplicationId) {
+      const app = applications.find(a => a.id === activeApplicationId);
+      if (app) {
+        setSaveAppName(app.name);
+        setSaveAppVersion(app.version);
+        setSaveAppTags(app.tags.join(", "));
+      }
+    } else {
+      setSaveAppName(lastBlueprint?.title || "");
+      setSaveAppVersion("1.0.0");
+      setSaveAppTags("");
+    }
+    setSaveModalOpen(true);
+  };
+
+  const handleSaveAppConfirm = () => {
+    if (!activeProjectId) return;
+    if (!saveAppName.trim()) {
+      triggerToast("Please enter a name", true);
+      return;
+    }
+
+    const appToSave = {
+      id: activeApplicationId || "app_" + Math.random().toString(36).substr(2, 9),
+      projectId: activeProjectId,
+      name: saveAppName.trim(),
+      version: saveAppVersion.trim() || "1.0.0",
+      tags: saveAppTags.split(",").map(t => t.trim()).filter(Boolean),
+      thumbnail: canvasSvg,
+      blueprint: lastBlueprint,
+      mermaidCode: mermaidCode,
+      drawioXML: drawioXML || "",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const saved = saveApplication(appToSave);
+    setActiveApplicationId(saved.id);
+    setSaveModalOpen(false);
+    refreshApplications(activeProjectId);
+    triggerToast("Application saved to project successfully! ✓", false);
+  };
+  // ── END REPO SYSTEM: Phase 4 ──
+
+  // ── REPO SYSTEM: Phase 5 ──
+  const handleInsertReference = (sourceApp: Application, isExternal = false) => {
+    if (!lastBlueprint) {
+      triggerToast("Please generate or load a diagram first before inserting references", true);
+      return;
+    }
+
+    const updated = { ...structuredClone(lastBlueprint) };
+    if (!updated.groups || updated.groups.length === 0) {
+      updated.groups = [{ id: "group_main", label: "Main Zone", nodes: [] }];
+    }
+
+    // Check if already referenced
+    let exists = false;
+    for (const g of updated.groups) {
+      if (g.nodes?.some((n: any) => n.refAppId === sourceApp.id)) {
+        exists = true;
+        break;
+      }
+    }
+
+    if (exists) {
+      triggerToast("Reference proxy already exists in active diagram", true);
+      return;
+    }
+
+    const proxyId = "proxy_" + Math.random().toString(36).substr(2, 9);
+    const newNode = {
+      id: proxyId,
+      label: `${sourceApp.name} (v${sourceApp.version})`,
+      type: isExternal ? "external_ref" : "internal_ref",
+      shape: "round",
+      refAppId: sourceApp.id,
+      refAppName: sourceApp.name,
+      refVersion: sourceApp.version,
+      refProjectId: sourceApp.projectId,
+      refBlueprint: sourceApp.blueprint,
+      expanded: false
+    };
+
+    updated.groups[0].nodes = [...(updated.groups[0].nodes || []), newNode];
+    setLastBlueprint(updated);
+    compileBlueprintToDiagrams(updated);
+    triggerToast(`Reference proxy for ${sourceApp.name} added to workspace! ✓`, false);
+  };
+  // ── END REPO SYSTEM: Phase 5 ──
+
+  // ── REPO SYSTEM: Phase 10 ──
+  const handleUpdateProxyVersion = (proxyNodeId: string) => {
+    if (!lastBlueprint) return;
+    const updated = { ...structuredClone(lastBlueprint) };
+    let found = false;
+    let refApp: any = null;
+
+    for (const g of updated.groups || []) {
+      if (g.nodes) {
+        for (const n of g.nodes) {
+          if (n.id === proxyNodeId) {
+            refApp = getApplication(n.refAppId);
+            if (refApp) {
+              n.refVersion = refApp.version;
+              n.refBlueprint = refApp.blueprint;
+              n.label = `${refApp.name} (v${refApp.version})`;
+              found = true;
+            }
+            break;
+          }
+        }
+      }
+      if (found) break;
+    }
+
+    if (found) {
+      setLastBlueprint(updated);
+      compileBlueprintToDiagrams(updated);
+      triggerToast("Reference updated to the latest version! ✓", false);
+    }
+  };
+  // ── END REPO SYSTEM: Phase 10 ──
+
   // ----------------------------------------------------
   // RESTORE HISTORIC GENERATIONS
   // ----------------------------------------------------
@@ -1381,7 +2027,7 @@ export default function Home() {
     triggerToast("Workspace cleared.", false);
   };
 
-  const exportPngFile = () => {
+  const exportPngFile = async () => {
     if (!canvasSvg) return;
     try {
       const svgString = canvasSvg;
@@ -1394,8 +2040,14 @@ export default function Home() {
       rootSvg.removeAttribute("transform");
       rootSvg.removeAttribute("style");
 
-      const width = rootSvg.viewBox?.baseVal?.width || rootSvg.clientWidth || 1000;
-      const height = rootSvg.viewBox?.baseVal?.height || rootSvg.clientHeight || 700;
+      // ── LOGO SYSTEM: inline logo images for export ──────────────────────────
+      // Clone the SVG so the live DOM is not mutated during export
+      const svgClone = rootSvg.cloneNode(true) as SVGSVGElement;
+      await inlineLogoImagesForExport(svgClone);
+      // ── END LOGO SYSTEM: inline logo images for export ──────────────────────
+
+      const width = svgClone.viewBox?.baseVal?.width || svgClone.clientWidth || 1000;
+      const height = svgClone.viewBox?.baseVal?.height || svgClone.clientHeight || 700;
 
       const scale = 2; // Output resolution expansion
       const canvas = document.createElement("canvas");
@@ -1406,7 +2058,7 @@ export default function Home() {
 
       ctx.scale(scale, scale);
 
-      const serialized = new XMLSerializer().serializeToString(rootSvg);
+      const serialized = new XMLSerializer().serializeToString(svgClone);
       const img = new Image();
       img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(serialized);
 
@@ -1414,12 +2066,17 @@ export default function Home() {
         ctx.fillStyle = "transparent";
         ctx.fillRect(0, 0, width, height);
         ctx.drawImage(img, 0, 0);
-        const imgUrl = canvas.toDataURL("image/png");
-        const a = document.createElement("a");
-        a.href = imgUrl;
-        a.download = "architecture-diagram.png";
-        a.click();
-        triggerToast("PNG exported at 2x resolution! ✓", false);
+        try {
+          const imgUrl = canvas.toDataURL("image/png");
+          const a = document.createElement("a");
+          a.href = imgUrl;
+          a.download = "architecture-diagram.png";
+          a.click();
+          triggerToast("PNG exported at 2x resolution! ✓", false);
+        } catch (err) {
+          console.error(err);
+          triggerToast("Failed PNG export (canvas tainted).", true);
+        }
       };
     } catch (e) {
       console.error(e);
@@ -1550,6 +2207,21 @@ export default function Home() {
     setGithubModalOpen(true);
   };
 
+  // ── REPO SYSTEM: Phase 2 ──
+  if (activeProjectId === null) {
+    return (
+      <>
+        <Script
+          src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"
+          strategy="afterInteractive"
+          onLoad={handleMermaidLoad}
+        />
+        <ProjectBrowser onOpenProject={(id) => setActiveProjectId(id)} />
+      </>
+    );
+  }
+  // ── END REPO SYSTEM: Phase 2 ──
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#0A0A0A] font-sans antialiased text-[#F0F0F0]">
       {/* Script for loading Mermaid.js with proper hydration bounds */}
@@ -1558,6 +2230,123 @@ export default function Home() {
         strategy="afterInteractive"
         onLoad={handleMermaidLoad}
       />
+
+      {/* ── REPO SYSTEM: Phase 3 ── */}
+      <aside
+        className={`flex-shrink-0 bg-[#070708] border-r border-white/10 flex flex-col h-full overflow-hidden transition-all duration-200 select-none ${
+          sidebarCollapsed ? "w-[60px]" : "w-[240px]"
+        }`}
+      >
+        {/* Sidebar Header / Project Info */}
+        <div className="p-4 border-b border-white/10 flex items-center justify-between gap-2 overflow-hidden h-[60px] flex-shrink-0">
+          {!sidebarCollapsed ? (
+            <div className="flex items-center gap-2 overflow-hidden">
+              <span
+                className="h-3 w-3 rounded-full flex-shrink-0"
+                style={{
+                  backgroundColor: activeProject?.color || "#d4ff00",
+                  boxShadow: `0 0 8px ${activeProject?.color || "#d4ff00"}40`,
+                }}
+              />
+              <span className="text-xs font-bold text-[#F0F0F0] truncate uppercase tracking-wider">
+                {activeProject?.name || "Project"}
+              </span>
+            </div>
+          ) : (
+            <span
+              className="h-3.5 w-3.5 rounded-full mx-auto flex-shrink-0"
+              style={{
+                backgroundColor: activeProject?.color || "#d4ff00",
+                boxShadow: `0 0 8px ${activeProject?.color || "#d4ff00"}40`,
+              }}
+            />
+          )}
+
+          <button
+            type="button"
+            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            className="p-1 hover:bg-white/5 rounded text-[#999999] hover:text-[#F0F0F0] cursor-pointer"
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            <ChevronRight className={`h-4 w-4 transition-transform ${sidebarCollapsed ? "" : "rotate-180"}`} />
+          </button>
+        </div>
+
+        {/* Back to Projects */}
+        <div className="p-3 border-b border-white/5 flex-shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setActiveProjectId(null);
+              setActiveApplicationId(null);
+            }}
+            className="w-full py-2 hover:bg-white/5 border border-white/5 rounded-lg text-xs text-[#999999] hover:text-[#F0F0F0] transition flex items-center justify-center gap-2 cursor-pointer"
+            title="Back to all projects"
+          >
+            <FolderTree className="h-3.5 w-3.5" />
+            {!sidebarCollapsed && <span className="font-semibold">← Projects</span>}
+          </button>
+        </div>
+
+        {/* Application List */}
+        <div className="flex-1 overflow-y-auto p-3 space-y-1.5 custom-scrollbar">
+          {!sidebarCollapsed && (
+            <div className="text-[9px] uppercase tracking-wider text-[#999999]/40 font-bold px-2 mb-2">
+              Diagram Models
+            </div>
+          )}
+
+          {applications.map((app) => (
+            <button
+              key={app.id}
+              onClick={() => handleLoadApplication(app)}
+              className={`w-full text-left p-2 rounded-xl transition flex items-center justify-between gap-2 group cursor-pointer ${
+                activeApplicationId === app.id
+                  ? "bg-white/5 border border-white/10 text-[#d4ff00] font-bold"
+                  : "hover:bg-white/5 text-[#999999] hover:text-[#F0F0F0] border border-transparent"
+              }`}
+              title={`${app.name} (v${app.version})`}
+            >
+              <div className="flex items-center gap-2 overflow-hidden min-w-0">
+                <div className="w-6 h-6 rounded-lg bg-white/5 flex-shrink-0 flex items-center justify-center border border-white/10">
+                  <Database className="h-3 w-3 text-[#999999] group-hover:text-[#F0F0F0]" />
+                </div>
+                {!sidebarCollapsed && (
+                  <span className="text-xs truncate font-medium">
+                    {app.name}
+                  </span>
+                )}
+              </div>
+
+              {!sidebarCollapsed && (
+                <span className="text-[8px] font-mono bg-white/5 px-1.5 py-0.5 rounded text-[#999999]">
+                  v{app.version}
+                </span>
+              )}
+            </button>
+          ))}
+
+          {applications.length === 0 && !sidebarCollapsed && (
+            <div className="text-center py-8 text-[10px] text-[#999999]/40 italic">
+              No saved diagrams.
+            </div>
+          )}
+        </div>
+
+        {/* Bottom Actions: New Diagram */}
+        <div className="p-3 border-t border-white/10 flex-shrink-0">
+          <button
+            type="button"
+            onClick={handleNewDiagram}
+            className="w-full py-2 bg-[#d4ff00]/10 hover:bg-[#d4ff00]/20 border border-[#d4ff00]/25 hover:border-[#d4ff00]/40 text-[#d4ff00] text-xs font-bold uppercase tracking-wider rounded-xl transition flex items-center justify-center gap-2 cursor-pointer"
+            title="Create New Diagram"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            {!sidebarCollapsed && <span>New Diagram</span>}
+          </button>
+        </div>
+      </aside>
+      {/* ── END REPO SYSTEM: Phase 3 ── */}
 
       {/* --------------------------------------------------
           LEFT PANEL / SIDEBAR
@@ -2075,6 +2864,35 @@ export default function Home() {
                       </div>
                     )}
 
+                    {/* ── REPO SYSTEM: Phase 8 ── */}
+                    {contextMenu && (
+                      <div
+                        className="absolute bg-[#0D0D0F] border border-white/15 p-1 rounded-xl shadow-2xl z-[999] min-w-[140px] select-none"
+                        style={{
+                          left: `${contextMenu.x}px`,
+                          top: `${contextMenu.y}px`,
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            toggleProxyNodeExpansion(contextMenu.nodeId);
+                            setContextMenu(null);
+                          }}
+                          className="w-full text-left px-3 py-2 hover:bg-[#d4ff00]/10 text-xs font-semibold text-[#F0F0F0] hover:text-[#d4ff00] rounded-lg transition flex items-center gap-2 cursor-pointer"
+                        >
+                          <Compass className="h-4 w-4" />
+                          {(() => {
+                            const allNodes = lastBlueprint?.groups?.flatMap((g: any) => g.nodes || []) || [];
+                            const n = allNodes.find((node: any) => node.id === contextMenu.nodeId);
+                            return n?.expanded ? "Collapse Reference" : "Expand Reference";
+                          })()}
+                        </button>
+                      </div>
+                    )}
+                    {/* ── END REPO SYSTEM: Phase 8 ── */}
+
                     {/* Absolute canvas action floaters */}
                     {canvasSvg && !canvasError && (
                       <div className="absolute bottom-5 right-5 flex items-center gap-1.5 p-1.5 bg-[#0C0C0E]/90 backdrop-blur-md border border-white/10 rounded-xl shadow-2xl z-20">
@@ -2092,6 +2910,18 @@ export default function Home() {
                         >
                           <RotateCcw className="h-3.5 w-3.5" />
                         </button>
+                        {/* ── REPO SYSTEM: Phase 4 ── */}
+                        {activeProjectId && (
+                          <button
+                            onClick={handleOpenSaveModal}
+                            className="px-2.5 py-1.5 bg-[#d4ff00]/10 border border-[#d4ff00]/30 hover:bg-[#d4ff00]/20 text-[10px] text-[#d4ff00] font-semibold rounded-lg flex items-center gap-1 transition cursor-pointer"
+                            title="Save diagram to active project"
+                          >
+                            <Database className="h-3.5 w-3.5" />
+                            Save
+                          </button>
+                        )}
+                        {/* ── END REPO SYSTEM: Phase 4 ── */}
                         <div className="h-4 w-px bg-white/10 mx-1" />
                         <button
                           onClick={exportPngFile}
@@ -2133,24 +2963,42 @@ export default function Home() {
                           <Settings className="h-4 w-4 text-[#d4ff00]" />
                           <span className="text-xs font-bold text-[#F0F0F0] uppercase tracking-wider">Design Inspector</span>
                         </div>
-                        <div className="grid grid-cols-2 gap-1 bg-white/5 p-1 rounded-xl">
+                        <div className="grid grid-cols-4 gap-1 bg-white/5 p-1 rounded-xl">
                           <button
                             type="button"
                             onClick={() => setRightPanelTab("inspector")}
                             className={`py-1.5 text-[10px] font-semibold rounded-lg transition-all cursor-pointer ${rightPanelTab === "inspector" ? "bg-[#d4ff00]/10 text-[#d4ff00] font-bold" : "text-[#999999] hover:text-[#F0F0F0]"}`}
                           >
-                            Properties
+                            Props
                           </button>
                           <button
                             type="button"
                             onClick={() => setRightPanelTab("diagnostics")}
                             className={`py-1.5 text-[10px] font-semibold rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${rightPanelTab === "diagnostics" ? "bg-[#d4ff00]/10 text-[#d4ff00] font-bold" : "text-[#999999] hover:text-[#F0F0F0]"}`}
                           >
-                            Security Scan
+                            Security
                             {getArchitectureScanResults(lastBlueprint).filter(r => r.type === "high" || r.type === "medium").length > 0 && (
                               <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-ping" />
                             )}
                           </button>
+                          {/* ── REPO SYSTEM: Phase 5 ── */}
+                          <button
+                            type="button"
+                            onClick={() => setRightPanelTab("references")}
+                            className={`py-1.5 text-[10px] font-semibold rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${rightPanelTab === "references" ? "bg-[#d4ff00]/10 text-[#d4ff00] font-bold" : "text-[#999999] hover:text-[#F0F0F0]"}`}
+                          >
+                            Refs
+                          </button>
+                          {/* ── END REPO SYSTEM: Phase 5 ── */}
+                          {/* ── LOGO SYSTEM: Tab Button ── */}
+                          <button
+                            type="button"
+                            onClick={() => setRightPanelTab("logos")}
+                            className={`py-1.5 text-[10px] font-semibold rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${rightPanelTab === "logos" ? "bg-[#d4ff00]/10 text-[#d4ff00] font-bold" : "text-[#999999] hover:text-[#F0F0F0]"}`}
+                          >
+                            Logos
+                          </button>
+                          {/* ── END LOGO SYSTEM: Tab Button ── */}
                         </div>
                       </div>
 
@@ -2482,6 +3330,458 @@ export default function Home() {
 
                           </div>
                         )}
+
+                        {/* ── REPO SYSTEM: Phases 5 & 6 ── */}
+                        {rightPanelTab === "references" && (
+                          <div className="space-y-4">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] font-bold text-[#999999] uppercase tracking-wider block">Reference Subsystems</span>
+                            </div>
+
+                            {/* ── REPO SYSTEM: Phase 10 ── */}
+                            {/* Section A: Active Subsystems in Diagram */}
+                            <div className="space-y-2">
+                              <span className="text-[9px] uppercase font-bold text-[#999999]/60 tracking-wider block">Subsystems in Diagram</span>
+                              <div className="space-y-1.5">
+                                {(() => {
+                                  const list: any[] = [];
+                                  if (lastBlueprint && lastBlueprint.groups) {
+                                    for (const g of lastBlueprint.groups) {
+                                      for (const n of g.nodes || []) {
+                                        if (n.type === "internal_ref" || n.type === "external_ref") {
+                                          list.push(n);
+                                        }
+                                      }
+                                    }
+                                  }
+                                  return list;
+                                })().map(node => {
+                                  const latestApp = getApplication(node.refAppId);
+                                  const isStale = latestApp && latestApp.version !== node.refVersion;
+                                  return (
+                                    <div key={node.id} className="p-2.5 bg-white/5 border border-white/10 rounded-xl space-y-2">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <div className="overflow-hidden min-w-0">
+                                          <h4 className="text-xs font-semibold text-[#F0F0F0] truncate">{node.refAppName}</h4>
+                                          <p className="text-[9px] text-[#999999]/60 mt-0.5">
+                                            Pinned: v{node.refVersion} {node.expanded ? "• Expanded" : "• Collapsed"}
+                                          </p>
+                                        </div>
+                                        {isStale && (
+                                          <span className="text-[8px] bg-amber-500/10 text-amber-400 border border-amber-500/20 px-1.5 py-0.5 rounded font-mono font-bold">
+                                            Update
+                                          </span>
+                                        )}
+                                      </div>
+                                      {isStale && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleUpdateProxyVersion(node.id)}
+                                          className="w-full py-1 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/20 text-amber-400 text-[9px] uppercase font-bold rounded-lg transition"
+                                        >
+                                          Sync to v{latestApp.version}
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                                {(() => {
+                                  const list: any[] = [];
+                                  if (lastBlueprint && lastBlueprint.groups) {
+                                    for (const g of lastBlueprint.groups) {
+                                      for (const n of g.nodes || []) {
+                                        if (n.type === "internal_ref" || n.type === "external_ref") {
+                                          list.push(n);
+                                        }
+                                      }
+                                    }
+                                  }
+                                  return list;
+                                })().length === 0 && (
+                                  <p className="text-[9px] text-[#999999]/40 italic">No subsystems inserted yet.</p>
+                                )}
+                              </div>
+                            </div>
+
+                            <hr className="border-white/5" />
+                            {/* ── END REPO SYSTEM: Phase 10 ── */}
+
+                            {/* Section B: Internal References */}
+                            <div className="space-y-2">
+                              <span className="text-[9px] uppercase font-bold text-[#999999]/60 tracking-wider block">Internal Diagrams</span>
+                              <div className="space-y-1.5">
+                                {listApplications(activeProjectId || undefined)
+                                  .filter(app => app.id !== activeApplicationId)
+                                  .map(app => (
+                                    <div key={app.id} className="p-2.5 bg-white/5 border border-white/10 rounded-xl flex items-center justify-between gap-2">
+                                      <div className="overflow-hidden min-w-0">
+                                        <h4 className="text-xs font-semibold text-[#F0F0F0] truncate">{app.name}</h4>
+                                        <p className="text-[9px] text-[#999999]/60 mt-0.5">v{app.version} • {app.entryNodes.length} entries</p>
+                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleInsertReference(app, false)}
+                                        className="px-2 py-1 bg-[#d4ff00]/10 hover:bg-[#d4ff00]/20 border border-[#d4ff00]/25 text-[#d4ff00] text-[9px] uppercase font-bold rounded-lg transition cursor-pointer"
+                                      >
+                                        Insert
+                                      </button>
+                                    </div>
+                                  ))}
+                                {listApplications(activeProjectId || undefined).filter(app => app.id !== activeApplicationId).length === 0 && (
+                                  <p className="text-[9px] text-[#999999]/40 italic">No other diagrams in this project.</p>
+                                )}
+                              </div>
+                            </div>
+
+                            <hr className="border-white/5" />
+
+                            {/* Section B: External References */}
+                            <div className="space-y-2">
+                              <span className="text-[9px] uppercase font-bold text-[#999999]/60 tracking-wider block">From Other Projects</span>
+                              <div className="space-y-1.5">
+                                {listApplications()
+                                  .filter(app => app.projectId !== activeProjectId)
+                                  .map(app => {
+                                    const proj = getProject(app.projectId);
+                                    return (
+                                      <div key={app.id} className="p-2.5 bg-white/5 border border-white/10 rounded-xl flex items-center justify-between gap-2">
+                                        <div className="overflow-hidden min-w-0">
+                                          <h4 className="text-xs font-semibold text-[#F0F0F0] truncate">{app.name}</h4>
+                                          <p className="text-[9px] text-[#999999]/60 mt-0.5">
+                                            Project: <span style={{ color: proj?.color }}>{proj?.name || "Other"}</span> • v{app.version}
+                                          </p>
+                                        </div>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleInsertReference(app, true)}
+                                          className="px-2 py-1 bg-[#d4ff00]/10 hover:bg-[#d4ff00]/20 border border-[#d4ff00]/25 text-[#d4ff00] text-[9px] uppercase font-bold rounded-lg transition cursor-pointer"
+                                        >
+                                          Import
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
+                                {listApplications().filter(app => app.projectId !== activeProjectId).length === 0 && (
+                                  <p className="text-[9px] text-[#999999]/40 italic">No diagrams in other projects.</p>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                        {/* ── END REPO SYSTEM: Phases 5 & 6 ── */}
+
+                        {/* ── LOGO SYSTEM: Logos Tab Panel ── */}
+                        {rightPanelTab === "logos" && (
+                          <div className="space-y-5">
+                            {/* SECTION A — Active node logos */}
+                            <div className="space-y-2">
+                              <span className="text-[10px] uppercase font-bold text-[#999999] tracking-wider block">
+                                Active Node Logos
+                              </span>
+                              <div className="space-y-1.5">
+                                {(() => {
+                                  const allNodes = lastBlueprint?.groups?.flatMap((g: any) => g.nodes || []) || [];
+                                  const activeLogosList = allNodes
+                                    .map((node: any) => {
+                                      const manualId = logoOverrides[node.id];
+                                      const entry = manualId ? resolveLogoById(manualId) : resolveLogoForNode(node.label ?? "");
+                                      return entry ? { node, entry, isManual: !!manualId } : null;
+                                    })
+                                    .filter(Boolean) as { node: any; entry: LogoEntry; isManual: boolean }[];
+
+                                  if (activeLogosList.length === 0) {
+                                    return (
+                                      <p className="text-[10px] text-[#999999]/50 italic leading-relaxed p-3 bg-white/5 rounded-xl border border-white/5 text-center">
+                                        No logos detected. Generate a diagram with named services like Kafka, PostgreSQL, or AWS S3 to auto-assign logos.
+                                      </p>
+                                    );
+                                  }
+
+                                  return activeLogosList.map(({ node, entry, isManual }) => (
+                                    <div
+                                      key={node.id}
+                                      className="flex items-center justify-between gap-3 p-2 bg-white/5 border border-white/10 rounded-xl transition hover:bg-white/10"
+                                    >
+                                      <div className="flex items-center gap-2.5 overflow-hidden min-w-0">
+                                        <div
+                                          className="h-6 w-6 rounded flex-shrink-0 flex items-center justify-center p-1"
+                                          style={{ backgroundColor: entry.brandColor }}
+                                        >
+                                          <img
+                                            src={entry.path}
+                                            alt={entry.name}
+                                            className="h-full w-full object-contain"
+                                            onError={(e) => {
+                                              console.warn("Failed to load logo SVG:", entry.path);
+                                              (e.target as HTMLElement).style.display = "none";
+                                            }}
+                                          />
+                                        </div>
+                                        <div className="overflow-hidden min-w-0">
+                                          <p className="text-xs font-semibold text-[#F0F0F0] truncate">
+                                            {node.label.length > 24 ? node.label.substring(0, 24) + "..." : node.label}
+                                          </p>
+                                          <p className="text-[9px] text-[#999999]/60 font-mono mt-0.5 truncate">
+                                            {entry.name}
+                                          </p>
+                                        </div>
+                                      </div>
+
+                                      <div className="flex items-center gap-2 flex-shrink-0">
+                                        <span
+                                          className={`text-[8px] font-bold font-mono px-1.5 py-0.5 rounded border uppercase tracking-wider ${
+                                            isManual
+                                              ? "bg-[#d4ff00]/10 text-[#d4ff00] border-[#d4ff00]/25"
+                                              : "bg-white/5 text-[#999999] border-white/10"
+                                          }`}
+                                        >
+                                          {isManual ? "manual" : "auto"}
+                                        </span>
+                                        {isManual && (
+                                          <button
+                                            type="button"
+                                            onClick={() => clearLogoOverride(node.id)}
+                                            className="text-red-400 hover:text-red-300 font-bold text-xs p-1 cursor-pointer"
+                                            title="Clear manual override"
+                                          >
+                                            ×
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+                                  ));
+                                })()}
+                              </div>
+                            </div>
+
+                            <hr className="border-white/5" />
+
+                            {/* SECTION B — Logo browser */}
+                            <div className="space-y-3">
+                              <span className="text-[10px] uppercase font-bold text-[#999999] tracking-wider block">
+                                Logo Library
+                              </span>
+
+                              {/* Search */}
+                              <input
+                                type="text"
+                                value={logoBrowserQuery}
+                                onChange={(e) => setLogoBrowserQuery(e.target.value)}
+                                placeholder="Search technology logos..."
+                                className="w-full bg-[#0C0C0E] border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-[#F0F0F0] placeholder-[#999999]/35 focus:outline-none focus:border-[#d4ff00]"
+                              />
+
+                              {/* ── LOGO SYSTEM: Top-of-Browser Popover ── */}
+                              {logoAssignTarget && !logoPopoverEntry && (
+                                <div className="bg-[#0E0E11]/95 border border-white/10 p-3 rounded-xl shadow-2xl space-y-2 mb-3">
+                                  <span className="text-[10px] uppercase font-bold text-white block">
+                                    Assign Logo to Node:
+                                  </span>
+                                  <div className="flex gap-2">
+                                    <select
+                                      value={logoPopoverNodeTarget}
+                                      onChange={(e) => setLogoPopoverNodeTarget(e.target.value)}
+                                      className="flex-1 bg-[#16161a] border border-white/10 rounded px-1.5 py-1 text-[11px] text-[#F0F0F0] focus:outline-none"
+                                    >
+                                      {lastBlueprint?.groups?.map((g: any) => (
+                                        <optgroup key={g.id} label={g.label} className="bg-[#0c0c0e]">
+                                          {g.nodes?.map((n: any) => (
+                                            <option key={n.id} value={n.id} className="bg-[#0c0c0e]">
+                                              {n.label}
+                                            </option>
+                                          ))}
+                                        </optgroup>
+                                      ))}
+                                    </select>
+                                  </div>
+                                  <p className="text-[10px] text-[#999999] italic">
+                                    Click a logo tile below to assign it to this node.
+                                  </p>
+                                  <div className="flex justify-end pt-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setLogoAssignTarget(null);
+                                      }}
+                                      className="px-3 py-1 bg-white/5 hover:bg-white/10 text-white text-[10px] font-bold uppercase rounded border border-white/10 transition"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Library list */}
+                              <div className="space-y-4">
+                                {(() => {
+                                  const allCategories = listAllCategories();
+                                  const searchResults = searchLogos(logoBrowserQuery);
+
+                                  if (searchResults.length === 0) {
+                                    return (
+                                      <p className="text-[10px] text-[#999999]/50 italic text-center py-4">
+                                        No matching logos found.
+                                      </p>
+                                    );
+                                  }
+
+                                  // Group results by category
+                                  const grouped: Record<LogoCategory, LogoEntry[]> = {} as any;
+                                  searchResults.forEach((item) => {
+                                    if (!grouped[item.category]) grouped[item.category] = [];
+                                    grouped[item.category].push(item);
+                                  });
+
+                                  return allCategories
+                                    .filter((cat) => grouped[cat] && grouped[cat].length > 0)
+                                    .map((category) => {
+                                      const items = grouped[category];
+                                      const isCollapsed = collapsedLogoCategories.has(category);
+
+                                      return (
+                                        <div key={category} className="space-y-2">
+                                          {/* Collapsible Header */}
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setCollapsedLogoCategories((prev) => {
+                                                const next = new Set(prev);
+                                                if (next.has(category)) next.delete(category);
+                                                else next.add(category);
+                                                return next;
+                                              });
+                                            }}
+                                            className="w-full flex items-center justify-between text-[9px] uppercase tracking-wider font-bold text-[#999999]/65 hover:text-white transition py-1 border-b border-white/5 cursor-pointer text-left"
+                                          >
+                                            <span>
+                                              {category} ({items.length})
+                                            </span>
+                                            <ChevronRight
+                                              className={`h-3 w-3 transition-transform ${
+                                                isCollapsed ? "" : "rotate-90"
+                                              }`}
+                                            />
+                                          </button>
+
+                                          {/* Grid content */}
+                                          {!isCollapsed && (
+                                            <div className="grid grid-cols-4 gap-2 pt-1.5">
+                                              {items.map((entry) => {
+                                                const isSelected = logoPopoverEntry?.id === entry.id;
+                                                return (
+                                                  <div key={entry.id} className="relative group/tile">
+                                                    <button
+                                                      type="button"
+                                                      onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        if (logoAssignTarget) {
+                                                          assignLogo(logoAssignTarget, entry.id);
+                                                          triggerToast(`Assigned ${entry.name}! ✓`, false);
+                                                          setLogoAssignTarget(null);
+                                                          setLogoPopoverEntry(null);
+                                                        } else {
+                                                          setLogoPopoverEntry(entry);
+                                                          const firstNode =
+                                                            lastBlueprint?.groups?.flatMap((g: any) => g.nodes || [])?.[0]?.id ||
+                                                            "";
+                                                          setLogoPopoverNodeTarget(firstNode);
+                                                        }
+                                                      }}
+                                                      className="w-full flex flex-col items-center gap-1.5 p-1 bg-[#121215] border border-white/5 rounded-xl transition hover:border-[#d4ff00]/40 hover:scale-[1.05] cursor-pointer"
+                                                      title={`Assign ${entry.name}`}
+                                                    >
+                                                      <div
+                                                        className="h-10 w-full rounded-lg flex items-center justify-center p-2 relative"
+                                                        style={{ backgroundColor: entry.brandColor }}
+                                                      >
+                                                        <img
+                                                          src={entry.path}
+                                                          alt={entry.name}
+                                                          className="h-full w-full object-contain"
+                                                          onError={(e) => {
+                                                            console.warn("Failed to load logo SVG:", entry.path);
+                                                            (e.target as HTMLElement).style.display = "none";
+                                                          }}
+                                                        />
+                                                      </div>
+                                                      <span className="text-[9px] text-[#999999] group-hover/tile:text-[#F0F0F0] truncate w-full text-center px-0.5">
+                                                        {entry.name}
+                                                      </span>
+                                                    </button>
+
+                                                    {/* Assignment Popover (absolute within relative tile) */}
+                                                    {isSelected && (
+                                                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 bg-[#0E0E11]/95 backdrop-blur-md border border-white/10 p-2.5 rounded-xl shadow-2xl z-30 min-w-[160px] text-left space-y-2">
+                                                        <span className="text-[9px] uppercase font-bold text-white block">
+                                                          Assign to Node:
+                                                        </span>
+                                                        <select
+                                                          value={logoPopoverNodeTarget}
+                                                          onChange={(e) => setLogoPopoverNodeTarget(e.target.value)}
+                                                          className="w-full bg-[#16161a] border border-white/10 rounded px-1.5 py-1 text-[10px] text-[#F0F0F0] focus:outline-none"
+                                                        >
+                                                          {lastBlueprint?.groups?.map((g: any) => (
+                                                            <optgroup
+                                                              key={g.id}
+                                                              label={g.label}
+                                                              className="bg-[#0c0c0e]"
+                                                            >
+                                                              {g.nodes?.map((n: any) => (
+                                                                <option
+                                                                  key={n.id}
+                                                                  value={n.id}
+                                                                  className="bg-[#0c0c0e]"
+                                                                >
+                                                                  {n.label}
+                                                                </option>
+                                                              ))}
+                                                            </optgroup>
+                                                          ))}
+                                                        </select>
+                                                        <div className="flex gap-1.5 pt-1">
+                                                          <button
+                                                            type="button"
+                                                            onClick={(e) => {
+                                                              e.stopPropagation();
+                                                              if (logoPopoverNodeTarget) {
+                                                                assignLogo(logoPopoverNodeTarget, entry.id);
+                                                                triggerToast(`Assigned ${entry.name}! ✓`, false);
+                                                              }
+                                                              setLogoPopoverEntry(null);
+                                                              setLogoAssignTarget(null);
+                                                            }}
+                                                            className="flex-1 py-1 bg-[#d4ff00]/15 hover:bg-[#d4ff00]/25 text-[#d4ff00] text-[9px] font-bold uppercase rounded transition"
+                                                          >
+                                                            Assign
+                                                          </button>
+                                                          <button
+                                                            type="button"
+                                                            onClick={(e) => {
+                                                              e.stopPropagation();
+                                                              setLogoPopoverEntry(null);
+                                                              setLogoAssignTarget(null);
+                                                            }}
+                                                            className="flex-1 py-1 bg-white/5 hover:bg-white/10 text-white text-[9px] font-bold uppercase rounded border border-white/10 transition"
+                                                          >
+                                                            Cancel
+                                                          </button>
+                                                        </div>
+                                                      </div>
+                                                    )}
+                                                  </div>
+                                                );
+                                              })}
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    });
+                                })()}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                        {/* ── END LOGO SYSTEM: Logos Tab Panel ── */}
 
                       </div>
                     </div>
@@ -3054,6 +4354,89 @@ export default function Home() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* ── REPO SYSTEM: Phase 4 ── */}
+      <AnimatePresence>
+        {saveModalOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            onClick={() => setSaveModalOpen(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-[#0d0d0d] border border-white/10 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <Database className="h-4 w-4 text-[#d4ff00]" />
+                  <h3 className="text-sm font-bold text-[#F0F0F0]">Save Diagram to Project</h3>
+                </div>
+                <button onClick={() => setSaveModalOpen(false)} className="text-[#999999] hover:text-white font-bold text-lg">×</button>
+              </div>
+
+              {/* Body */}
+              <div className="p-6 space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-[#999999] uppercase tracking-wider block">Diagram Name</label>
+                  <input
+                    type="text"
+                    value={saveAppName}
+                    onChange={(e) => setSaveAppName(e.target.value)}
+                    placeholder="e.g. Core Billing Services"
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-[#F0F0F0] placeholder-[#999999]/40 focus:outline-none focus:border-[#d4ff00] transition"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-[#999999] uppercase tracking-wider block">Version</label>
+                  <input
+                    type="text"
+                    value={saveAppVersion}
+                    onChange={(e) => setSaveAppVersion(e.target.value)}
+                    placeholder="1.0.0"
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-[#F0F0F0] placeholder-[#999999]/40 focus:outline-none focus:border-[#d4ff00] transition"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-[#999999] uppercase tracking-wider block">Tags (comma separated)</label>
+                  <input
+                    type="text"
+                    value={saveAppTags}
+                    onChange={(e) => setSaveAppTags(e.target.value)}
+                    placeholder="aws, db, backend"
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-[#F0F0F0] placeholder-[#999999]/40 focus:outline-none focus:border-[#d4ff00] transition"
+                  />
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-4 border-t border-white/10 flex justify-end gap-2">
+                <button
+                  onClick={() => setSaveModalOpen(false)}
+                  className="px-4 py-2 text-xs font-semibold text-[#999999] hover:text-[#F0F0F0] border border-white/10 hover:border-white/20 rounded-lg transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveAppConfirm}
+                  className="px-5 py-2 bg-[#d4ff00] hover:bg-[#e5ff4d] text-black text-xs font-bold rounded-lg transition cursor-pointer"
+                >
+                  Confirm Save
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      {/* ── END REPO SYSTEM: Phase 4 ── */}
     </div>
   );
 }
