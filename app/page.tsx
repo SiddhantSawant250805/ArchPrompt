@@ -1298,6 +1298,73 @@ export default function Home() {
     // Normalize line endings
     let clean = code.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
+    // ── STEP 0: Token-level line reconstruction ──────────────────────────────
+    // Instead of trying to regex-split a squashed string, we tokenize the whole
+    // input by every known Mermaid keyword and reconstruct proper line breaks.
+    // This handles ALL squash patterns including "title Text direction TDNode("
+    // regardless of spacing or surrounding characters.
+    const TOKEN_KEYWORDS = [
+      // Diagram type declarations (no parens)
+      "%%{", "C4Context", "C4Container", "C4Component",
+      "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
+      "flowchart", "mindmap", "quadrantChart", "gantt", "timeline",
+      // Direction
+      "direction",
+      // C4 function keywords (followed by `(`)
+      "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
+      "ContainerDb_Ext", "ContainerQueue_Ext",
+      "System_Boundary", "Container_Boundary",
+      "ContainerDb", "ContainerQueue",
+      "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
+      "LAYOUT_WITH_LEGEND",
+      // Plain keywords
+      "subgraph", "classDef", "participant", "actor",
+      "title", "section",
+    ];
+
+    // Build a regex that matches any keyword at a non-newline boundary
+    // We insert a newline BEFORE any keyword that appears after a non-newline char
+    // Process keywords longest-first to avoid partial matches
+    const sortedKeywords = [...TOKEN_KEYWORDS].sort((a, b) => b.length - a.length);
+
+    // Process line-by-line so we preserve existing correct line breaks
+    const reconstructed = clean.split("\n").flatMap((line) => {
+      // Skip comment/init lines and empty lines
+      if (!line.trim() || line.trim().startsWith("%%")) return [line];
+
+      let result = line;
+      // For each keyword, if it appears anywhere in the line NOT at position 0
+      // (meaning it's squashed after something), inject a newline before it.
+      // We do this iteratively until stable.
+      for (let pass = 0; pass < 5; pass++) {
+        let changed = false;
+        for (const kw of sortedKeywords) {
+          // Skip graph — too short and causes false positives in labels
+          if (kw === "graph") continue;
+          const idx = result.indexOf(kw);
+          if (idx > 0) {
+            // Only split if the char before is NOT a newline and the keyword is
+            // not inside a quoted string
+            const before = result.slice(0, idx);
+            const after = result.slice(idx);
+            // Check we're not inside quotes by counting unescaped quotes before idx
+            const quoteCount = (before.match(/"/g) || []).length;
+            if (quoteCount % 2 === 0) {
+              result = before.trimEnd() + "\n" + after;
+              changed = true;
+              break; // restart the keyword scan on the new first segment
+            }
+          }
+        }
+        if (!changed) break;
+      }
+      // Split the result on any injected newlines and return multiple lines
+      return result.split("\n");
+    });
+
+    clean = reconstructed.join("\n");
+    // ── END STEP 0 ───────────────────────────────────────────────────────────
+
     // ── Category 1: Diagram-type declarations ────────────────────────────────
     // These are standalone keywords with NO parentheses that may be squashed
     // directly against another word character (e.g. "C4Contexttitle").
@@ -1435,8 +1502,9 @@ export default function Home() {
     clean = clean.replace(new RegExp(`(direction\\s+${DIR})([([{<_])`, "gi"), "$1\n$2");
     // Handle underscore directly after the direction value (TD_System → TD\n_System)
     clean = clean.replace(new RegExp(`(${DIR})(_)`, "gi"), "$1\n$2");
-    // Handle title followed by any word then direction
-    clean = clean.replace(new RegExp(`(title\\s+[^\\n]+?)(direction)`, "gi"), "$1\n$2");
+    // Handle title followed by direction — use greedy [^\n]+ to consume all text
+    // before `direction` rather than stopping too early with a lazy quantifier
+    clean = clean.replace(new RegExp(`(title\\s+[^\\n]+)(direction)`, "gi"), "$1\n$2");
 
     // 1. flowchart/graph + direction squashed against subgraph / end / another graph keyword.
     //    IMPORTANT: use explicit direction alternation instead of \w+ so "TD" doesn't
@@ -1460,6 +1528,15 @@ export default function Home() {
     clean = clean.replace(/((?:graph|flowchart)\s+(?:TD|LR|RL|BT|TB))\s*(?!\n)/g, '$1\n');
     // Ensure newline after subgraph declarations
     clean = clean.replace(/(subgraph\s+[^\n]+)\s*(?!\n)/g, '$1\n');
+    // ── NUCLEAR DIRECTION PASS: anything before OR after `direction TD/LR/...`
+    // that is not a newline gets split off — greedy, applied after all other passes
+    clean = clean.replace(/([^\n]+?)\s*(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n]+)/gi, (_, before, dir, after) => {
+      const parts: string[] = [];
+      if (before.trim()) parts.push(before.trim());
+      parts.push(dir.trim());
+      if (after.trim()) parts.push(after.trim());
+      return parts.join("\n");
+    });
 
     // Wrap bare node labels containing spaces/special chars in quotes
     // e.g. A(My Service) -> A("My Service")
@@ -1551,21 +1628,54 @@ export default function Home() {
       const DIR_ALT = "(?:TD|LR|TB|BT|RL)";
       let s = c.replace(/\r\n/g, "\n");
 
+      // ── Token-based line reconstruction (same logic as sanitizeMermaidCode) ──
+      const INNER_KEYWORDS = [
+        "C4Context", "C4Container", "C4Component",
+        "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
+        "flowchart", "mindmap", "quadrantChart", "gantt", "timeline",
+        "direction",
+        "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
+        "ContainerDb_Ext", "ContainerQueue_Ext",
+        "System_Boundary", "Container_Boundary",
+        "ContainerDb", "ContainerQueue",
+        "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
+        "LAYOUT_WITH_LEGEND", "subgraph", "classDef", "participant", "actor",
+        "title", "section",
+      ].sort((a, b) => b.length - a.length);
+
+      const lines2 = s.split("\n").flatMap((line) => {
+        if (!line.trim() || line.trim().startsWith("%%")) return [line];
+        let result = line;
+        for (let pass = 0; pass < 5; pass++) {
+          let changed = false;
+          for (const kw of INNER_KEYWORDS) {
+            const idx = result.indexOf(kw);
+            if (idx > 0) {
+              const before = result.slice(0, idx);
+              const after = result.slice(idx);
+              const quoteCount = (before.match(/"/g) || []).length;
+              if (quoteCount % 2 === 0) {
+                result = before.trimEnd() + "\n" + after;
+                changed = true;
+                break;
+              }
+            }
+          }
+          if (!changed) break;
+        }
+        return result.split("\n");
+      });
+      s = lines2.join("\n");
+
       // flowchart/graph declaration squashed against subgraph or next graph keyword
       s = s.replace(new RegExp(`(flowchart\\s+${DIR_ALT})(subgraph)`, "gi"), "$1\n$2");
       s = s.replace(new RegExp(`(flowchart\\s+${DIR_ALT})(graph)`, "gi"), "$1\n$2");
       s = s.replace(new RegExp(`(graph\\s+${DIR_ALT})(subgraph)`, "gi"), "$1\n$2");
 
-      // direction squashed against surrounding text — all boundary types
-      s = s.replace(new RegExp(`(\\w)(direction\\s+${DIR_ALT})`, "gi"), "$1\n$2");
-      s = s.replace(new RegExp(`([)\\]}>])(direction\\s+${DIR_ALT})`, "gi"), "$1\n$2");
+      // direction with no-space value → add space, then split adjacent content
+      s = s.replace(new RegExp(`(direction)(${DIR_ALT})`, "gi"), "$1 $2");
       s = s.replace(new RegExp(`(direction\\s+${DIR_ALT})(\\w)`, "gi"), "$1\n$2");
       s = s.replace(new RegExp(`(direction\\s+${DIR_ALT})([([{<_])`, "gi"), "$1\n$2");
-      s = s.replace(new RegExp(`(direction)(${DIR_ALT})`, "gi"), "$1 $2");
-      // Handle underscore directly after the direction value (TD_System → TD\n_System)
-      s = s.replace(new RegExp(`(${DIR_ALT})(_)`, "gi"), "$1\n$2");
-      // Handle title followed by any word then direction
-      s = s.replace(new RegExp(`(title\\s+[^\\n]+?)(direction)`, "gi"), "$1\n$2");
 
       // end keyword always on its own line
       s = s.replace(/([^\n])\b(end)\b(\s*\n)/gi, "$1\nend\n");
@@ -1591,29 +1701,44 @@ export default function Home() {
 
     const m = (window as any).mermaid;
     const renderId = "mermaid-render-" + Math.random().toString(36).substring(2, 9);
-    // Emergency line-by-line guard: split any line that still has
-    // a direction keyword squashed against surrounding text, or
-    // a title followed by another statement on same line
+
+    // Emergency line-by-line guard using token-based splitting — same approach
+    // as sanitizeMermaidCode's STEP 0 but applied to finalCode as a last resort
+    const EMERGENCY_KEYWORDS = [
+      "C4Context", "C4Container", "C4Component",
+      "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
+      "flowchart", "mindmap", "quadrantChart", "gantt", "timeline",
+      "direction",
+      "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
+      "ContainerDb_Ext", "ContainerQueue_Ext",
+      "System_Boundary", "Container_Boundary",
+      "ContainerDb", "ContainerQueue",
+      "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
+      "LAYOUT_WITH_LEGEND", "subgraph", "classDef", "participant", "actor",
+      "title", "section",
+    ].sort((a, b) => b.length - a.length);
+
     const emergencyLines = finalCode.split("\n").flatMap((line) => {
-      // Split direction when it appears mid-text
-      const dirMatch = line.match(
-        /^(.*?[^\n])(direction\s+(?:TD|LR|TB|BT|RL))(.*)$/i
-      );
-      if (dirMatch && dirMatch[1].trim() !== "" && dirMatch[3].trim() !== "") {
-        return [dirMatch[1], dirMatch[2], dirMatch[3]].filter(Boolean);
-      }
-      if (dirMatch && dirMatch[1].trim() !== "") {
-        return [dirMatch[1], dirMatch[2] + dirMatch[3]].filter(Boolean);
-      }
-      // Handle title followed by any keyword on same line (e.g. "title Textdirection TD" or "title TextPerson...")
-      const titleMatch = line.match(/^(title\s+[^\n]+?)(?=\s*(?:direction|Person|System|Container|subgraph|end|classDef|participant|$))/i);
-      if (titleMatch && line !== titleMatch[1]) {
-        const rest = line.slice(titleMatch[1].length).trim();
-        if (rest) {
-          return [titleMatch[1], rest];
+      if (!line.trim() || line.trim().startsWith("%%")) return [line];
+      let result = line;
+      for (let pass = 0; pass < 5; pass++) {
+        let changed = false;
+        for (const kw of EMERGENCY_KEYWORDS) {
+          const idx = result.indexOf(kw);
+          if (idx > 0) {
+            const before = result.slice(0, idx);
+            const after = result.slice(idx);
+            const quoteCount = (before.match(/"/g) || []).length;
+            if (quoteCount % 2 === 0) {
+              result = before.trimEnd() + "\n" + after;
+              changed = true;
+              break;
+            }
+          }
         }
+        if (!changed) break;
       }
-      return [line];
+      return result.split("\n");
     });
     const guardedCode = emergencyLines.join("\n");
     try {
@@ -1627,6 +1752,47 @@ export default function Home() {
       return svg;
     } catch (e: any) {
       console.error("Client side parsing failed:", e);
+
+      // ── Nuclear auto-repair: token-based line reconstruction ─────────────
+      if (e.message && /lexical error|parse error|unrecognized text/i.test(e.message)) {
+        try {
+          const repairedLines = guardedCode.split("\n").flatMap((line) => {
+            if (!line.trim() || line.trim().startsWith("%%")) return [line];
+            let result = line;
+            for (let pass = 0; pass < 5; pass++) {
+              let changed = false;
+              for (const kw of EMERGENCY_KEYWORDS) {
+                const idx = result.indexOf(kw);
+                if (idx > 0) {
+                  const before = result.slice(0, idx);
+                  const after = result.slice(idx);
+                  const quoteCount = (before.match(/"/g) || []).length;
+                  if (quoteCount % 2 === 0) {
+                    result = before.trimEnd() + "\n" + after;
+                    changed = true;
+                    break;
+                  }
+                }
+              }
+              if (!changed) break;
+            }
+            return result.split("\n");
+          });
+
+          const repairedCode = repairedLines.join("\n");
+          const repairRenderId = "mermaid-render-repair-" + Math.random().toString(36).substring(2, 9);
+          const { svg } = await m.render(repairRenderId, repairedCode);
+          setMermaidCode(repairedCode);
+          setCanvasSvg(svg);
+          setCanvasError(null);
+          setTimeout(() => { autoFitDiagramView(); }, 50);
+          return svg;
+        } catch (repairErr) {
+          console.error("Auto-repair attempt also failed:", repairErr);
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────
+
       setCanvasError(e.message || "The compile engine failed to parse visual code styles.");
       // Clean up bad renderer states
       const badElem = document.getElementById(renderId);

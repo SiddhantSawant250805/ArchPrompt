@@ -76,33 +76,122 @@ Strict rules:
 `;
 
 function buildCompilerPrompt(kind: string, direction: string): string {
-  return `You are a professional Mermaid.js v10 code generator.
-Translate the provided Blueprint JSON into a perfectly styled and executable Mermaid.js v10 diagram.
+  return `You are a Mermaid.js diagram code generator. Your output is parsed directly by the Mermaid lexer — any syntax error will crash the renderer with no recovery.
 
-Strict rules:
-1. Output ONLY the raw, executable Mermaid code. Absolutely zero explanations, zero markdown code block fences (\`\`\`mermaid), no backticks, no introduction, and no trailing comments.
-2. The very first non-empty line of the output MUST be the valid Mermaid diagram declaration for the requested diagram type.
-3. Every node ID must strictly match [a-zA-Z][a-zA-Z0-9_]*.
-4. Ensure all syntax elements are fully compliant with Mermaid v10 definitions.
-5. Always place a newline after the diagram type/direction declaration (e.g., flowchart TD, graph TD, etc.) before the first node or statement.
-6. Always wrap node labels containing spaces or special characters in double quotes (e.g. A("Microservices Platform")).
-7. Each node, edge, and declaration must occupy its own separate line. Never concatenate or squash multiple statements on a single line (e.g., NEVER write "title Platformdirection TD" or "direction TDPerson(...)").
+══════════════════════════════════════════════
+ABSOLUTE RULE — ONE STATEMENT PER LINE
+══════════════════════════════════════════════
+Every single token must be on its own line. This is non-negotiable.
+The Mermaid lexer reads line by line. Two statements on one line = immediate crash.
+
+══════════════════════════════════════════════
+RULE 1 — DIAGRAM DECLARATION
+══════════════════════════════════════════════
+The diagram type declaration MUST be the first non-comment line, alone, nothing else on it.
+
+CORRECT:
+  flowchart TD
+  A("Auth Service") --> B("Database")
+
+WRONG — will crash:
+  flowchart TDA("Auth Service") --> B("Database")
+  flowchart TD A("Auth Service") --> B("Database")
+
+══════════════════════════════════════════════
+RULE 2 — direction KEYWORD
+══════════════════════════════════════════════
+\`direction\` is a standalone keyword. It MUST always be on its own line.
+It must NEVER be attached to: the end of a node label, the start of a node ID, or any other keyword.
+
+CORRECT:
+  subgraph Backend
+  direction TD
+  A("Service A") --> B("Service B")
+  end
+
+WRONG — will crash every time:
+  Person("Microservices Platform")direction TD
+  System_Boundary(...)direction TD
+  direction TDNodeId(
+
+THE MOST COMMON CRASH PATTERN — never produce this:
+  LABEL)direction TD
+  LABEL)direction TDNodeId(
+
+══════════════════════════════════════════════
+RULE 3 — NODE LABELS WITH SPACES OR SPECIAL CHARACTERS
+══════════════════════════════════════════════
+Any label containing spaces, slashes, hyphens, dots, or parentheses MUST be wrapped in double quotes.
+
+CORRECT:
+  A("API Gateway")
+  B("PostgreSQL DB")
+  C("auth-service")
+  D("S3 / CloudFront")
+
+WRONG — will crash:
+  A(API Gateway)
+  B(PostgreSQL DB)
+
+══════════════════════════════════════════════
+RULE 4 — SUBGRAPH STRUCTURE
+══════════════════════════════════════════════
+subgraph title, direction, nodes, and end must each be on separate lines.
+
+CORRECT:
+  subgraph "Service Layer"
+  direction TD
+  A("Auth") --> B("Orders")
+  end
+
+WRONG:
+  subgraph "Service Layer"
+  direction TDA("Auth") --> B("Orders")end
+
+══════════════════════════════════════════════
+RULE 5 — NO MARKDOWN FENCES
+══════════════════════════════════════════════
+Return ONLY raw Mermaid syntax.
+Do NOT wrap in \`\`\`mermaid or \`\`\` or any other markdown.
+Do NOT add any explanation, comment, or text before or after the diagram.
+
+══════════════════════════════════════════════
+RULE 6 — C4 DIAGRAMS
+══════════════════════════════════════════════
+Each C4 function call (Person, System, Container, Rel, etc.) must be on its own line.
+
+CORRECT:
+  C4Context
+  Person(personAlias, "Customer", "A customer")
+  System(systemAlias, "E-Commerce", "Handles orders")
+  Rel(personAlias, systemAlias, "Uses")
+
+WRONG:
+  C4ContextPerson(personAlias, "Customer")System(systemAlias, "E-Commerce")
+
+══════════════════════════════════════════════
+SELF-CHECK BEFORE OUTPUTTING
+══════════════════════════════════════════════
+Before returning your output, scan every line and verify:
+1. Does any line contain more than one node definition? → Split it.
+2. Does any line contain a node label closing ) immediately followed by a keyword? → Split it.
+3. Does \`direction\` appear anywhere except as the only token on its line? → Split it.
+4. Does any node label contain spaces without double quotes? → Add quotes.
+5. Is there any text before the diagram type declaration? → Remove it.
+If any check fails, fix it before outputting.
+
+Node IDs must strictly match [a-zA-Z][a-zA-Z0-9_]*.
+Every node ID must be unique. Every edge from/to must reference a declared node ID.
 
 GUIDELINES BY KIND:
 - flowchart:
-  To ensure strictly orthogonal connections (no curved/diagonal lines, only right-angled horizontal and vertical line paths), your very first line MUST be:
-  %%{init: {"theme": "dark", "flowchart": {"curve": "stepBefore"}}}%%
-  Immediately following that on the next line, start with "flowchart ${direction}".
-  Shape-to-syntax mapping:
-    - rect: id["Label"]
-    - round: id("Label")
-    - diamond: id{"Label"}
-    - cylinder: id[("Label")]
-    - hexagon: id{{"Label"}}
-    - stadium: id(["Label"])
-  Edges: "A --> B" or "A -->|Label| B". For dashed "A -.-> B" or "A -. Label .-> B". No malformed syntax.
-  Groups: Map each blueprint group into a Mermaid "subgraph group_id [\\"Group Label\\"]" block containing its nodes, followed by "end". Place ALL subgraphs before any edges are declared.
-  Apply this color palette using classDef blocks at the very bottom:
+  First line MUST be: %%{init: {"theme": "dark", "flowchart": {"curve": "stepBefore"}}}%%
+  Second line: flowchart ${direction}
+  (These two lines are the ONLY lines that go on the flowchart declaration — nothing else.)
+  Shape syntax: rect=id["L"], round=id("L"), diamond=id{"L"}, cylinder=id[("L")], hexagon=id{{"L"}}, stadium=id(["L"])
+  Edges: A --> B or A -->|Label| B. Dashed: A -.-> B or A -. Label .-> B.
+  Groups: each blueprint group → subgraph group_id ["Group Label"] on its own line, then nodes, then end on its own line. ALL subgraphs before any edges.
+  Color palette — add these classDef lines at the very bottom, each on its own line:
     classDef service  fill:#1a2540,stroke:#5b8df8,color:#e4eaf8,stroke-width:2px;
     classDef database fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;
     classDef external fill:#25183a,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;
@@ -110,106 +199,68 @@ GUIDELINES BY KIND:
     classDef queue    fill:#2a1a18,stroke:#f87171,color:#e4eaf8,stroke-width:2px;
     classDef gateway  fill:#0e1f28,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;
     classDef process  fill:#1a2035,stroke:#5b8df8,color:#e4eaf8,stroke-width:1px;
-  Assign classes like "class nodeId service".
+  Assign: class nodeId service (each on its own line)
 
-  CORRECT SPACING EXAMPLE (flowchart):
+  EXACT OUTPUT FORMAT (every statement on its own line, no exceptions):
   %%{init: {"theme": "dark", "flowchart": {"curve": "stepBefore"}}}%%
   flowchart TD
-  subgraph group_web ["Web Layer"]
-      web_client["🖥️ Web Client"]
+  subgraph group_web ["🌐 Web Layer"]
+  web_client["🖥️ Web Client"]
   end
-  subgraph group_api ["API Layer"]
-      api_gateway["🚀 API Gateway"]
+  subgraph group_api ["🚀 API Layer"]
+  api_gateway["🚀 API Gateway"]
   end
   web_client --> api_gateway
+  classDef service fill:#1a2540,stroke:#5b8df8,color:#e4eaf8,stroke-width:2px;
+  class web_client service
+  class api_gateway gateway
 
 - sequence:
-  Start with "sequenceDiagram"
-  Declare participants: "participant alias as \\"Name\\"" or "actor alias as \\"Name\\""
-  Map messages: "A ->> B: message" or "A -->> B: response". Use loop, alt, else, end controls where relevant.
+  First line: sequenceDiagram
+  Participants: participant alias as "Name" (each on its own line)
+  Messages: A ->> B: message (each on its own line)
 
 - er:
-  Start with "erDiagram"
-  Declare entities and their relationships. Relationship syntax: "ENTITY1 ||--o{ ENTITY2 : \\"label\\"" (using ||, o|, }|, o{, solid --, dashed ..). Entities should have field definitions inside curly braces. E.g., EntityName { string id PK }.
+  First line: erDiagram
+  Relationships: ENTITY1 ||--o{ ENTITY2 : "label" (each on its own line)
 
 - class:
-  Start with "classDiagram"
-  Declare classes with attributes and methods: "class ClassName { +field : Type\\n+method() : Type }"
-  Define associations: "A --|> B" (inheritance), "A --* B" (composition), "A --o B" (aggregation), "A --> B" (link).
+  First line: classDiagram
+  Classes and associations each on their own line.
 
 - state:
-  Start with "stateDiagram-v2"
-  Syntax: "[*] --> StateA", "StateA --> StateB : Event", "StateB --> [*]". Support nested state definitions if necessary.
+  First line: stateDiagram-v2
+  Transitions each on their own line.
 
 - c4context / c4container / c4component:
-  Use Mermaid C4 definitions (C4Context, C4Container, C4Component).
-  C4Context: title, Person(alias, "Label", "Description"), System(alias, "Label", "Description"), System_Ext(alias, "Label", "Description"), Rel(from, to, "Label").
-  C4Container: System_Boundary(alias, "Boundary Label") { Container(alias, "Label", "Technology", "Description") }, Person, ContainerDb.
-  C4Component: Container_Boundary(alias, "Boundary Label") { Component(alias, "Label", "Technology", "Description") }.
-  IMPORTANT STRICT RULES FOR MERMAID:
-  1. Each component declaration, boundary block, relationship (Rel), the title, and the direction declaration MUST be written on its own separate new line. Do NOT combine statements on the same line.
-  2. Quote all node labels that contain spaces, special characters, or reserved words — use double quotes: A["My Label"]
-  3. Never use TD, LR, TB, BT, RL as part of a node ID or label — these are reserved Mermaid direction keywords. Rename any node whose ID or label contains these strings.
-  4. Avoid underscores in node IDs if they appear adjacent to reserved keywords — use camelCase or hyphens instead (e.g., systemCore instead of System_TD).
-  5. Validate the output mentally by checking that every line is either a valid declaration, node definition, or edge — nothing else.
-  6. The graph type and direction must always be on their own dedicated first line — e.g. "flowchart LR" alone, nothing else on that line.
-  7. Every "subgraph" keyword must start on a new line, never immediately following the direction declaration or any other statement.
-  8. Every "end" keyword must be on its own line to close each subgraph block.
-  9. Each node definition, edge, and directive must occupy its own line — never concatenate two statements on a single line.
-  10. Use consistent 2 or 4 space indentation inside subgraph blocks for readability.
-  11. Output the diagram as a properly newline-separated string — every statement on its own line, no exceptions. Do NOT use string concatenation or template literals that could collapse whitespace — emit the diagram as a raw multiline string.
-  12. After generating, mentally re-parse each line and confirm no two statements share a line before returning.
-  13. Return only the raw Mermaid code — no markdown fences (no \`\`\`mermaid), no explanation, no preamble.
-  Ensure you include "LAYOUT_WITH_LEGEND()" on a separate new line at the very end of the diagram.
+  First line: C4Context (or C4Container / C4Component)
+  title, direction, Person(), System(), Rel(), LAYOUT_WITH_LEGEND() — each MUST be on its own line.
+  LAYOUT_WITH_LEGEND() must be the last line.
 
-  CORRECT SPACING EXAMPLE (c4context):
+  EXACT OUTPUT FORMAT:
   C4Context
   title Online Banking System
   direction TD
   Person(customer, "Banking Customer", "A customer of the bank")
-  System(banking_system, "Internet Banking System", "Allows customers to view account info")
-  Rel(customer, banking_system, "Uses")
+  System(bankingSystem, "Internet Banking System", "Allows customers to view account info")
+  Rel(customer, bankingSystem, "Uses")
   LAYOUT_WITH_LEGEND()
 
 - gantt:
-  Start with "gantt"
-  Syntax: "title ...", "dateFormat YYYY-MM-DD", "section SectionName", "Task Label : active, task1, 2026-06-14, 10d".
+  First line: gantt
+  title, dateFormat, section, and tasks each on their own line.
 
 - timeline:
-  Start with "timeline"
-  Syntax: "title ...", "section Era", "Year : Event Title : Description".
+  First line: timeline
+  title, section, and events each on their own line.
 
 - mindmap:
-  Start with "mindmap"
-  Root node on the first text line indent level 0: "root((Topic))".
-  Branches/leaves indented by steps of 2 spaces. Supports shape wrappers. E.g. "  branch((ShapeLabel))" or "    leaf[SquareLabel]".
+  First line: mindmap
+  Root and branches indented by 2 spaces per level.
 
 - quadrant:
-  Start with "quadrantChart"
-  Declare titles, axes: "x-axis LeftLabel --> RightLabel", "y-axis BottomLabel --> TopLabel". Declared quadrants: "quadrant-1 Q1Label", etc. Add items: "Item Name: [0.35, 0.72]".
-
-CRITICAL MERMAID SYNTAX RULES — violations will crash the renderer:
-
-1. Every statement MUST be on its own line. Never concatenate two statements on one line.
-
-2. The direction declaration MUST always be on its own separate line:
-   CORRECT:
-     flowchart TD
-     Person("Microservices Platform")
-   WRONG (will crash):
-     flowchart TDPerson("Microservices Platform")
-
-3. Node labels with spaces or special characters MUST use double quotes:
-   CORRECT:  A("My Service")
-   WRONG:    A(My Service)
-
-4. After any closing bracket/paren, NEVER append another keyword on the same line:
-   WRONG:  Person("Label")direction TD
-   CORRECT:
-     Person("Label")
-     direction TD
-
-5. Return ONLY raw Mermaid syntax. No markdown fences (no mermaid).
+  First line: quadrantChart
+  x-axis, y-axis, quadrant labels, and items each on their own line.
 `;
 }
 
@@ -269,6 +320,49 @@ function sanitizeContent(text: string): string {
 
   // Normalize line endings
   clean = clean.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  // ── STEP 0: Token-based line reconstruction ──────────────────────────────
+  // Tokenize by every known Mermaid keyword and inject newlines before any
+  // keyword found mid-line. Handles all squash patterns including
+  // "title Microservices Platformdirection TDSystem_boundary(...)".
+  const ROUTE_TOKEN_KEYWORDS = [
+    "C4Context", "C4Container", "C4Component",
+    "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
+    "flowchart", "mindmap", "quadrantChart", "gantt", "timeline",
+    "direction",
+    "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
+    "ContainerDb_Ext", "ContainerQueue_Ext",
+    "System_Boundary", "Container_Boundary",
+    "ContainerDb", "ContainerQueue",
+    "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
+    "LAYOUT_WITH_LEGEND", "subgraph", "classDef", "participant", "actor",
+    "title", "section",
+  ].sort((a: string, b: string) => b.length - a.length);
+
+  const routeReconstructed = clean.split("\n").flatMap((line: string) => {
+    if (!line.trim() || line.trim().startsWith("%%")) return [line];
+    let result = line;
+    for (let pass = 0; pass < 5; pass++) {
+      let changed = false;
+      for (const kw of ROUTE_TOKEN_KEYWORDS) {
+        const idx = result.indexOf(kw);
+        if (idx > 0) {
+          const before = result.slice(0, idx);
+          const after = result.slice(idx);
+          const quoteCount = (before.match(/"/g) || []).length;
+          if (quoteCount % 2 === 0) {
+            result = before.trimEnd() + "\n" + after;
+            changed = true;
+            break;
+          }
+        }
+      }
+      if (!changed) break;
+    }
+    return result.split("\n");
+  });
+  clean = routeReconstructed.join("\n");
+  // ── END STEP 0 ───────────────────────────────────────────────────────────
 
   // ── Category 1: Diagram-type declarations ────────────────────────────────
   // Standalone keywords with NO parentheses that may be squashed directly
@@ -420,8 +514,8 @@ function sanitizeContent(text: string): string {
   clean = clean.replace(new RegExp(`(direction)(${DIR})`, "gi"), "$1 $2");
   // Handle underscore directly after the direction value (TD_System → TD\n_System)
   clean = clean.replace(new RegExp(`(${DIR})(_)`, "gi"), "$1\n$2");
-  // Handle title followed by any word then direction
-  clean = clean.replace(new RegExp(`(title\\s+[^\\n]+?)(direction)`, "gi"), "$1\n$2");
+  // Handle title followed by any word then direction — greedy match
+  clean = clean.replace(new RegExp(`(title\\s+[^\\n]+)(direction)`, "gi"), "$1\n$2");
 
   // 1. flowchart/graph + direction squashed against subgraph / end.
   //    Use explicit direction alternation instead of \w+ so "TD" isn't
@@ -439,6 +533,14 @@ function sanitizeContent(text: string): string {
 
   // LAYOUT_WITH_LEGEND always on its own line
   clean = clean.replace(/\s*LAYOUT_WITH_LEGEND(\(\))?\s*/gi, "\nLAYOUT_WITH_LEGEND()\n");
+  // ── NUCLEAR DIRECTION PASS: ensure `direction TD/LR/...` is always isolated on its own line
+  clean = clean.replace(/([^\n]+?)\s*(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n]+)/gi, (_, before, dir, after) => {
+    const parts: string[] = [];
+    if (before.trim()) parts.push(before.trim());
+    parts.push(dir.trim());
+    if (after.trim()) parts.push(after.trim());
+    return parts.join("\n");
+  });
   // Collapse excessive blank lines
   clean = clean.replace(/\n{3,}/g, "\n\n");
   return clean.trim();
