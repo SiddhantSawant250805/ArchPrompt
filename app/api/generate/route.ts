@@ -1,15 +1,21 @@
 import { GoogleGenAI } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
 
-// Initialize Gemini Client
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    }
-  }
-});
+// Check if API key is configured
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+
+// Initialize Gemini Client only if key is available
+const ai = GEMINI_API_KEY && GEMINI_API_KEY !== "your-gemini-api-key-here"
+  ? new GoogleGenAI({
+      apiKey: GEMINI_API_KEY,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        }
+      }
+    })
+  : null;
 
 const DEFAULT_MODEL = "gemini-3.5-flash";
 
@@ -575,8 +581,19 @@ async function generateWithFallback({
 }): Promise<string> {
   let geminiError: any = null;
 
+  // Check if any LLM provider is configured
+  const hasGeminiKey = GEMINI_API_KEY && GEMINI_API_KEY !== "your-gemini-api-key-here";
+  const hasGroqKey = GROQ_API_KEY && GROQ_API_KEY !== "your-groq-api-key-here";
+
+  if (!hasGeminiKey && !hasGroqKey) {
+    throw new Error(
+      "No LLM API key configured. Please set GEMINI_API_KEY or GROQ_API_KEY in your .env file. " +
+      "Get a Gemini key at https://aistudio.google.com/apikey"
+    );
+  }
+
   // Try Gemini first if the API key is configured
-  if (process.env.GEMINI_API_KEY) {
+  if (hasGeminiKey && ai) {
     try {
       const response = await ai.models.generateContent({
         model: DEFAULT_MODEL,
@@ -597,12 +614,12 @@ async function generateWithFallback({
       console.warn("Gemini model execution failed, attempting fallback...", err.message || err);
       geminiError = err;
     }
-  } else {
-    geminiError = new Error("GEMINI_API_KEY environment variable is not defined.");
+  } else if (!hasGeminiKey) {
+    geminiError = new Error("GEMINI_API_KEY not configured (using placeholder value).");
   }
 
   // If Gemini failed or was skipped, try GROQ fallback
-  if (process.env.GROQ_API_KEY) {
+  if (hasGroqKey) {
     console.log("Using Groq API fallback with model 'llama-3.3-70b-versatile'...");
     try {
       // Safely extract string content for Groq which is text-only
@@ -639,7 +656,7 @@ async function generateWithFallback({
       const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+          "Authorization": `Bearer ${GROQ_API_KEY}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
