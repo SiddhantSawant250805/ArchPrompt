@@ -187,6 +187,29 @@ GUIDELINES BY KIND:
 - quadrant:
   Start with "quadrantChart"
   Declare titles, axes: "x-axis LeftLabel --> RightLabel", "y-axis BottomLabel --> TopLabel". Declared quadrants: "quadrant-1 Q1Label", etc. Add items: "Item Name: [0.35, 0.72]".
+
+CRITICAL MERMAID SYNTAX RULES — violations will crash the renderer:
+
+1. Every statement MUST be on its own line. Never concatenate two statements on one line.
+
+2. The direction declaration MUST always be on its own separate line:
+   CORRECT:
+     flowchart TD
+     Person("Microservices Platform")
+   WRONG (will crash):
+     flowchart TDPerson("Microservices Platform")
+
+3. Node labels with spaces or special characters MUST use double quotes:
+   CORRECT:  A("My Service")
+   WRONG:    A(My Service)
+
+4. After any closing bracket/paren, NEVER append another keyword on the same line:
+   WRONG:  Person("Label")direction TD
+   CORRECT:
+     Person("Label")
+     direction TD
+
+5. Return ONLY raw Mermaid syntax. No markdown fences (no mermaid).
 `;
 }
 
@@ -391,14 +414,14 @@ function sanitizeContent(text: string): string {
   //    Use explicit direction alternation instead of \w+ so "TD" isn't
   //    consumed together with the following keyword as one token.
   clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(subgraph)`, "gi"), "$1\n$2");
-  clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(graph)`,    "gi"), "$1\n$2");
-  clean = clean.replace(new RegExp(`(graph\\s+${DIR})(subgraph)`,     "gi"), "$1\n$2");
-  clean = clean.replace(new RegExp(`(graph\\s+${DIR})(graph)`,        "gi"), "$1\n$2");
+  clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(graph)`, "gi"), "$1\n$2");
+  clean = clean.replace(new RegExp(`(graph\\s+${DIR})(subgraph)`, "gi"), "$1\n$2");
+  clean = clean.replace(new RegExp(`(graph\\s+${DIR})(graph)`, "gi"), "$1\n$2");
 
   // 2. Any remaining keyword-to-keyword merges that survived the loop
   clean = clean.replace(/(subgraph\s+\S+)(subgraph)/gi, "$1\n$2");
-  clean = clean.replace(/(\bend\b)(subgraph)/gi,         "$1\n$2");
-  clean = clean.replace(/(\bend\b)(flowchart)/gi,        "$1\n$2");
+  clean = clean.replace(/(\bend\b)(subgraph)/gi, "$1\n$2");
+  clean = clean.replace(/(\bend\b)(flowchart)/gi, "$1\n$2");
   clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(end\\b)`, "gi"), "$1\n$2");
 
   // LAYOUT_WITH_LEGEND always on its own line
@@ -555,7 +578,7 @@ export async function POST(req: NextRequest) {
           contentsPayload = inputPrompt;
         }
       }
-      
+
       const text = await generateWithFallback({
         systemInstruction: PARSER_SYSTEM,
         contents: contentsPayload,
@@ -574,7 +597,7 @@ export async function POST(req: NextRequest) {
       }
 
       const systemPrompt = buildCompilerPrompt(blueprint.diagramKind || "flowchart", blueprint.direction || "TD");
-      
+
       const text = await generateWithFallback({
         systemInstruction: systemPrompt,
         contents: JSON.stringify(blueprint),
@@ -608,7 +631,7 @@ export async function POST(req: NextRequest) {
           });
 
           drawioXML = sanitizeContent(text);
-          
+
           // Basic check on server side. The full DOMParser review will run on client,
           // but we do a quick check here to reject obviously broken ones immediately.
           if (!drawioXML.includes("<mxfile>") || !drawioXML.includes("</mxfile>")) {

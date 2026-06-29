@@ -345,14 +345,14 @@ export default function Home() {
     if (!file) return;
 
     const reader = new FileReader();
-    const isText = file.type.startsWith("text/") || 
-                   file.type === "application/json" || 
-                   file.type === "text/csv" ||
-                   file.name.endsWith(".md") || 
-                   file.name.endsWith(".txt") || 
-                   file.name.endsWith(".json") || 
-                   file.name.endsWith(".yaml") || 
-                   file.name.endsWith(".yml");
+    const isText = file.type.startsWith("text/") ||
+      file.type === "application/json" ||
+      file.type === "text/csv" ||
+      file.name.endsWith(".md") ||
+      file.name.endsWith(".txt") ||
+      file.name.endsWith(".json") ||
+      file.name.endsWith(".yaml") ||
+      file.name.endsWith(".yml");
 
     reader.onload = (event) => {
       const content = event.target?.result as string;
@@ -1052,9 +1052,9 @@ export default function Home() {
     }
     const safeId = "node_" + newNodeLabel.toLowerCase().replace(/[^a-z0-9]/g, "_");
     const targetGroupId = newNodeGroup || lastBlueprint?.groups?.[0]?.id || "default_group";
-    
+
     const updatedBlueprint = { ...lastBlueprint };
-    
+
     // Ensure target group exists
     let targetGroup = updatedBlueprint.groups?.find((g: any) => g.id === targetGroupId);
     if (!targetGroup) {
@@ -1063,7 +1063,7 @@ export default function Home() {
       updatedBlueprint.groups.push(targetGroup);
     }
     if (!targetGroup.nodes) targetGroup.nodes = [];
-    
+
     // Insert node
     targetGroup.nodes.push({
       id: safeId,
@@ -1085,7 +1085,7 @@ export default function Home() {
     }
     const updatedBlueprint = { ...lastBlueprint };
     if (!updatedBlueprint.edges) updatedBlueprint.edges = [];
-    
+
     updatedBlueprint.edges.push({
       from: newEdgeFrom,
       to: newEdgeTo,
@@ -1101,7 +1101,7 @@ export default function Home() {
 
   const getArchitectureScanResults = (blueprint: any) => {
     if (!blueprint) return [];
-    
+
     const reports: any[] = [];
     const allNodes = blueprint.groups?.flatMap((g: any) => g.nodes || []) || [];
     const allEdges = blueprint.edges || [];
@@ -1109,7 +1109,7 @@ export default function Home() {
     const hasDatabase = allNodes.some((n: any) => n.type === "database");
     const hasGateway = allNodes.some((n: any) => n.type === "gateway" || n.type === "ui");
     const hasQueue = allNodes.some((n: any) => n.type === "queue");
-    
+
     // Check 1: Missing Ingress Gateway / UI layer
     if (!hasGateway && allNodes.length > 2) {
       reports.push({
@@ -1128,7 +1128,7 @@ export default function Home() {
     if (hasDatabase) {
       const dbNodes = allNodes.filter((n: any) => n.type === "database");
       const hasReplicaGroup = blueprint.groups?.some((g: any) => g.label?.toLowerCase().includes("replica") || g.label?.toLowerCase().includes("secondary") || g.label?.toLowerCase().includes("cluster"));
-      
+
       if (dbNodes.length === 1 && !hasReplicaGroup) {
         reports.push({
           id: "database_spof",
@@ -1199,7 +1199,7 @@ export default function Home() {
   const handleQuickFixAudit = (reportId: string, actionPayload: any) => {
     if (!lastBlueprint) return;
     const updatedBlueprint = { ...lastBlueprint };
-    
+
     if (actionPayload.action === "add_gateway") {
       const gatewayId = "api_gateway";
       const allNodes = updatedBlueprint.groups?.flatMap((g: any) => g.nodes || []) || [];
@@ -1224,7 +1224,7 @@ export default function Home() {
         });
       }
       triggerToast("Central Ingress API Gateway established! ✓", false);
-    } 
+    }
     else if (actionPayload.action === "add_db_replica") {
       let dbNode: any = null;
       let dbGroup: any = null;
@@ -1348,8 +1348,6 @@ export default function Home() {
      */
     const applySplitPass = (input: string): string => {
       let segments = input.split('"');
-      // If there's an unclosed quote (even number of segments), treat the whole string as unquoted
-      // to prevent the sanitizer from being completely bypassed and crashing the renderer.
       if (segments.length % 2 === 0) {
         segments = [input];
       }
@@ -1357,61 +1355,46 @@ export default function Home() {
       for (let i = 0; i < segments.length; i += 2) {
         let seg = segments[i];
 
-        // Category 4 — structural block keywords (subgraph / end) — MUST run
-        // FIRST, before Category 1, because Category 1 contains "graph" which
-        // would otherwise split "subgraph" → "sub\ngraph". By inserting the
-        // newline before "subgraph" as one atomic unit first, the whole word
-        // is already on its own line and Category 1 never sees a bare "graph".
+        // ── Structural block keywords first (subgraph before graph) ──
         for (const kw of STRUCTURAL_KEYWORDS) {
           const regex = new RegExp(`([^\\n])(${kw}(?:\\s|$))`, "g");
           seg = seg.replace(regex, "$1\n$2");
         }
 
-        // Category 1 — diagram declarations: no `(`, no \b required
-        // Match any non-newline char immediately followed by the keyword
+        // ── Diagram declarations ──
         for (const kw of DIAGRAM_DECLARATIONS) {
           const pattern = kw === "graph" ? "(?<!sub)graph" : kw;
           const regex = new RegExp(`([^\\n])(${pattern})`, "g");
           seg = seg.replace(regex, "$1\n$2");
-          // Also split if followed immediately by a letter (e.g. C4Contexttitle -> C4Context\ntitle)
           const trailingRegex = new RegExp(`(${pattern})([a-zA-Z])`, "g");
           seg = seg.replace(trailingRegex, "$1\n$2");
         }
 
-        // Category 2 — C4 function calls: keyword followed by (
-        // Match any character except newline and underscore (avoid splitting System_Boundary into System_\nBoundary)
+        // ── C4 function calls ──
         for (const kw of C4_FUNC_KEYWORDS) {
           const regex = new RegExp(`([^\\n_])\\s*(${kw}\\s*\\()`, "g");
           seg = seg.replace(regex, "$1\n$2");
         }
 
-
-        // Special: direction TD/LR/TB/BT/RL — three passes:
-        //  1a. Split any word-char IMMEDIATELY before `direction` (e.g. Platformdirection → Platform\ndirection).
-        //      Uses \w instead of [^\n] so it fires even when direction is squashed mid-word.
-        //  1b. Also split non-word, non-newline chars before direction (e.g. )direction → )\ndirection).
-        //  2.  Split any word-char IMMEDIATELY after the direction value (e.g. direction TDSystem_ → direction TD\nSystem_).
-        //  3.  Handle direction with NO space before the value (e.g. directionTD → direction TD).
+        // ── Direction keyword — ALL boundary character types ──
+        // Pass 1: word-char before direction
         seg = seg.replace(/(\w)(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
-        seg = seg.replace(/([^\n\w])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+        // Pass 2: closing paren/bracket before direction  ← KEY FIX
+        seg = seg.replace(/([)\]}>])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+        // Pass 3: any other non-newline char before direction
+        seg = seg.replace(/([^\n\w)\]}>])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+        // Pass 4: word-char directly after direction value
         seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))(\w)/gi, "$1\n$2");
+        // Pass 5: opening paren/bracket after direction value  ← KEY FIX
+        seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))([\(\[\{])/gi, "$1\n$2");
+        // Pass 6: no-space directionTD → direction TD
         seg = seg.replace(/(direction)(TD|LR|TB|BT|RL)/gi, "$1 $2");
 
-        // Category 3 — plain keywords.
-        // Two passes per keyword because a single lookbehind cannot handle
-        // the word-char→keyword squash (e.g. "externaltitle" or "Platformclass"):
-        //  Pass A: use (\w) to catch word-char immediately before the keyword.
-        //          No lookbehind needed — if it's preceded by a word char it MUST split.
-        //  Pass B: use ([^\n]) + (?<![\w]) for non-word, non-newline chars (original logic).
-        // NOTE: the trailing (?:\s+|:|(?=\s*$)) ensures we only match standalone
-        //       keywords — "classDef" won't incorrectly split "class" because
-        //       "D" is not whitespace/colon/end-of-line.
+        // ── Plain keywords ──
         for (const kw of PLAIN_KEYWORDS) {
           const escaped = kw.replace(/[-]/g, "\\-");
-          // Pass A: word-char → keyword (lookbehind would block this case)
           const wordBeforeRegex = new RegExp(`(\\w)(${escaped}(?:\\s+|:|(?=\\s*$)))`, "g");
           seg = seg.replace(wordBeforeRegex, "$1\n$2");
-          // Pass B: non-word non-newline → keyword (original lookbehind logic)
           const nonWordRegex = new RegExp(`([^\\n])((?<![\\w])${escaped}(?:\\s+|:|(?=\\s*$)))`, "g");
           seg = seg.replace(nonWordRegex, "$1\n$2");
         }
@@ -1438,25 +1421,32 @@ export default function Home() {
     //    safety net that catches any case the per-segment loop may have missed
     //    (e.g. inside an odd-split quoted segment, or zero-space directionTD).
     const DIR = "(?:TD|LR|TB|BT|RL)";
+    // No-space directionTD → direction TD
     clean = clean.replace(new RegExp(`(direction)(${DIR})`, "gi"), "$1 $2");
+    // Word-char before direction
     clean = clean.replace(new RegExp(`(\\w)(direction\\s+${DIR})`, "gi"), "$1\n$2");
+    // Closing bracket/paren before direction  ← NEW
+    clean = clean.replace(new RegExp(`([)\\]}>])(direction\\s+${DIR})`, "gi"), "$1\n$2");
+    // Word-char after direction value
     clean = clean.replace(new RegExp(`(direction\\s+${DIR})(\\w)`, "gi"), "$1\n$2");
+    // Opening bracket/paren after direction value  ← NEW
+    clean = clean.replace(new RegExp(`(direction\\s+${DIR})([([{])`, "gi"), "$1\n$2");
 
     // 1. flowchart/graph + direction squashed against subgraph / end / another graph keyword.
     //    IMPORTANT: use explicit direction alternation instead of \w+ so "TD" doesn't
     //    get swallowed together with the following keyword into one token.
     clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(subgraph)`, "gi"), "$1\n$2");
-    clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(graph)`,    "gi"), "$1\n$2");
-    clean = clean.replace(new RegExp(`(graph\\s+${DIR})(subgraph)`,     "gi"), "$1\n$2");
-    clean = clean.replace(new RegExp(`(graph\\s+${DIR})(graph)`,        "gi"), "$1\n$2");
+    clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(graph)`, "gi"), "$1\n$2");
+    clean = clean.replace(new RegExp(`(graph\\s+${DIR})(subgraph)`, "gi"), "$1\n$2");
+    clean = clean.replace(new RegExp(`(graph\\s+${DIR})(graph)`, "gi"), "$1\n$2");
 
     // 2. Any remaining keyword-to-keyword merges that survived the loop
     clean = clean.replace(/(subgraph\s+\S+)(subgraph)/gi, "$1\n$2");
-    clean = clean.replace(/(\bend\b)(subgraph)/gi,         "$1\n$2");
-    clean = clean.replace(/(\bend\b)(flowchart)/gi,        "$1\n$2");
+    clean = clean.replace(/(\bend\b)(subgraph)/gi, "$1\n$2");
+    clean = clean.replace(/(\bend\b)(flowchart)/gi, "$1\n$2");
     clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(end\\b)`, "gi"), "$1\n$2");
 
-     // LAYOUT_WITH_LEGEND always on its own line
+    // LAYOUT_WITH_LEGEND always on its own line
     clean = clean.replace(/\s*LAYOUT_WITH_LEGEND(\(\))?\s*/gi, "\nLAYOUT_WITH_LEGEND()\n");
 
     // ── DEFENSIVE REPARSING PASSES ──────────────────────────────────────────
@@ -1505,18 +1495,18 @@ export default function Home() {
       "erDiagram", "classDiagram", "stateDiagram-v2", "gantt", "timeline", "mindmap",
       "quadrantChart", "title", "flowchart", "graph"
     ];
-    
+
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line || line.startsWith("%%")) continue;
-      
+
       let statementCount = 0;
       const matchedKeywords: string[] = [];
-      
+
       // Split by double quotes to ignore keywords inside labels
       const parts = line.split('"');
       const outsideQuotes = parts.filter((_, idx) => idx % 2 === 0).join(" ");
-      
+
       for (const kw of keywords) {
         let regex: RegExp;
         if (["Person", "System", "Container", "Component", "Boundary", "Rel"].includes(kw)) {
@@ -1524,13 +1514,13 @@ export default function Home() {
         } else {
           regex = new RegExp(`\\b${kw}\\b`, "i");
         }
-        
+
         if (regex.test(outsideQuotes)) {
           statementCount++;
           matchedKeywords.push(kw);
         }
       }
-      
+
       if (statementCount > 1) {
         return {
           isValid: false,
@@ -1540,7 +1530,7 @@ export default function Home() {
         };
       }
     }
-    
+
     return { isValid: true };
   };
 
@@ -1552,17 +1542,27 @@ export default function Home() {
     const cleanCode = sanitizeMermaidCode(code);
 
     const sanitizeMermaid = (c: string): string => {
-      return c
-        .replace(/\r\n/g, '\n')
-        // Fix merged flowchart declaration + subgraph
-        .replace(/(flowchart\s+(?:LR|RL|TD|TB|BT))(subgraph)/gi, '$1\n$2')
-        // Fix any other keyword merges on the same line
-        .replace(/(flowchart\s+(?:LR|RL|TD|TB|BT))(graph)/gi, '$1\n$2')
-        // Ensure end keyword is always on its own line
-        .replace(/([^\n])\b(end)\b(\s*\n)/gi, '$1\nend\n')
-        // Collapse excessive blank lines
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
+      const DIR_ALT = "(?:TD|LR|TB|BT|RL)";
+      let s = c.replace(/\r\n/g, "\n");
+
+      // flowchart/graph declaration squashed against subgraph or next graph keyword
+      s = s.replace(new RegExp(`(flowchart\\s+${DIR_ALT})(subgraph)`, "gi"), "$1\n$2");
+      s = s.replace(new RegExp(`(flowchart\\s+${DIR_ALT})(graph)`, "gi"), "$1\n$2");
+      s = s.replace(new RegExp(`(graph\\s+${DIR_ALT})(subgraph)`, "gi"), "$1\n$2");
+
+      // direction squashed against surrounding text — all boundary types
+      s = s.replace(new RegExp(`(\\w)(direction\\s+${DIR_ALT})`, "gi"), "$1\n$2");
+      s = s.replace(new RegExp(`([)\\]}>])(direction\\s+${DIR_ALT})`, "gi"), "$1\n$2");
+      s = s.replace(new RegExp(`(direction\\s+${DIR_ALT})(\\w)`, "gi"), "$1\n$2");
+      s = s.replace(new RegExp(`(direction\\s+${DIR_ALT})([\\(\\[\\{<])`, "gi"), "$1\n$2");
+      s = s.replace(new RegExp(`(direction)(${DIR_ALT})`, "gi"), "$1 $2");
+
+      // end keyword always on its own line
+      s = s.replace(/([^\n])\b(end)\b(\s*\n)/gi, "$1\nend\n");
+
+      // collapse excessive blank lines
+      s = s.replace(/\n{3,}/g, "\n\n");
+      return s.trim();
     };
 
     const finalCode = sanitizeMermaid(cleanCode);
@@ -1581,8 +1581,24 @@ export default function Home() {
 
     const m = (window as any).mermaid;
     const renderId = "mermaid-render-" + Math.random().toString(36).substring(2, 9);
+    // Emergency line-by-line guard: split any line that still has
+    // a direction keyword squashed against surrounding text
+    const emergencyLines = finalCode.split("\n").flatMap((line) => {
+      // If a line contains direction mid-text (not as the whole line), split it
+      const dirMatch = line.match(
+        /^(.*?[^\n])(direction\s+(?:TD|LR|TB|BT|RL))(.*?)$/i
+      );
+      if (dirMatch && dirMatch[1].trim() !== "" && dirMatch[3].trim() !== "") {
+        return [dirMatch[1], dirMatch[2], dirMatch[3]].filter(Boolean);
+      }
+      if (dirMatch && dirMatch[1].trim() !== "") {
+        return [dirMatch[1], dirMatch[2] + dirMatch[3]].filter(Boolean);
+      }
+      return [line];
+    });
+    const guardedCode = emergencyLines.join("\n");
     try {
-      const { svg } = await m.render(renderId, finalCode);
+      const { svg } = await m.render(renderId, guardedCode);
       setCanvasSvg(svg);
       setCanvasError(null);
       // Auto centers the dynamic diagram view
@@ -2233,9 +2249,8 @@ export default function Home() {
 
       {/* ── REPO SYSTEM: Phase 3 ── */}
       <aside
-        className={`flex-shrink-0 bg-[#070708] border-r border-white/10 flex flex-col h-full overflow-hidden transition-all duration-200 select-none ${
-          sidebarCollapsed ? "w-[60px]" : "w-[240px]"
-        }`}
+        className={`flex-shrink-0 bg-[#070708] border-r border-white/10 flex flex-col h-full overflow-hidden transition-all duration-200 select-none ${sidebarCollapsed ? "w-[60px]" : "w-[240px]"
+          }`}
       >
         {/* Sidebar Header / Project Info */}
         <div className="p-4 border-b border-white/10 flex items-center justify-between gap-2 overflow-hidden h-[60px] flex-shrink-0">
@@ -2300,11 +2315,10 @@ export default function Home() {
             <button
               key={app.id}
               onClick={() => handleLoadApplication(app)}
-              className={`w-full text-left p-2 rounded-xl transition flex items-center justify-between gap-2 group cursor-pointer ${
-                activeApplicationId === app.id
-                  ? "bg-white/5 border border-white/10 text-[#d4ff00] font-bold"
-                  : "hover:bg-white/5 text-[#999999] hover:text-[#F0F0F0] border border-transparent"
-              }`}
+              className={`w-full text-left p-2 rounded-xl transition flex items-center justify-between gap-2 group cursor-pointer ${activeApplicationId === app.id
+                ? "bg-white/5 border border-white/10 text-[#d4ff00] font-bold"
+                : "hover:bg-white/5 text-[#999999] hover:text-[#F0F0F0] border border-transparent"
+                }`}
               title={`${app.name} (v${app.version})`}
             >
               <div className="flex items-center gap-2 overflow-hidden min-w-0">
@@ -2352,7 +2366,7 @@ export default function Home() {
           LEFT PANEL / SIDEBAR
           -------------------------------------------------- */}
       <aside className="w-[340px] flex-shrink-0 bg-[#0A0A0A] border-r border-white/10 flex flex-col h-full overflow-hidden select-none">
-        
+
         {/* Branding header area */}
         <div className="p-6 border-b border-white/10 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -2440,11 +2454,10 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => setCompilerMethod("visual")}
-                className={`py-2 text-[10px] font-mono font-bold tracking-wider uppercase rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${
-                  compilerMethod === "visual"
-                    ? "bg-[#d4ff00]/10 text-[#d4ff00] border border-[#d4ff00]/25 shadow-[0_0_8px_rgba(212,255,0,0.08)] font-bold"
-                    : "text-[#999999] hover:text-[#F0F0F0] hover:bg-white/5 border border-transparent font-normal"
-                }`}
+                className={`py-2 text-[10px] font-mono font-bold tracking-wider uppercase rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${compilerMethod === "visual"
+                  ? "bg-[#d4ff00]/10 text-[#d4ff00] border border-[#d4ff00]/25 shadow-[0_0_8px_rgba(212,255,0,0.08)] font-bold"
+                  : "text-[#999999] hover:text-[#F0F0F0] hover:bg-white/5 border border-transparent font-normal"
+                  }`}
                 title="Embed the exact Mermaid SVG inside draw.io to guarantee pixel-perfect visual parity"
               >
                 <Eye className="h-3 w-3" />
@@ -2453,11 +2466,10 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => setCompilerMethod("deterministic")}
-                className={`py-2 text-[10px] font-mono font-bold tracking-wider uppercase rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${
-                  compilerMethod === "deterministic"
-                    ? "bg-[#d4ff00]/10 text-[#d4ff00] border border-[#d4ff00]/25 shadow-[0_0_8px_rgba(212,255,0,0.08)] font-bold"
-                    : "text-[#999999] hover:text-[#F0F0F0] hover:bg-white/5 border border-transparent font-normal"
-                }`}
+                className={`py-2 text-[10px] font-mono font-bold tracking-wider uppercase rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${compilerMethod === "deterministic"
+                  ? "bg-[#d4ff00]/10 text-[#d4ff00] border border-[#d4ff00]/25 shadow-[0_0_8px_rgba(212,255,0,0.08)] font-bold"
+                  : "text-[#999999] hover:text-[#F0F0F0] hover:bg-white/5 border border-transparent font-normal"
+                  }`}
                 title="Use ultra-fast algorithmic topology mapping for perfect geometric alignments instantly"
               >
                 <Layers className="h-3 w-3" />
@@ -2466,11 +2478,10 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => setCompilerMethod("gemini")}
-                className={`py-2 text-[10px] font-mono font-bold tracking-wider uppercase rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${
-                  compilerMethod === "gemini"
-                    ? "bg-[#d4ff00]/10 text-[#d4ff00] border border-[#d4ff00]/25 shadow-[0_0_8px_rgba(212,255,0,0.08)] font-bold"
-                    : "text-[#999999] hover:text-[#F0F0F0] hover:bg-white/5 border border-transparent font-normal"
-                }`}
+                className={`py-2 text-[10px] font-mono font-bold tracking-wider uppercase rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${compilerMethod === "gemini"
+                  ? "bg-[#d4ff00]/10 text-[#d4ff00] border border-[#d4ff00]/25 shadow-[0_0_8px_rgba(212,255,0,0.08)] font-bold"
+                  : "text-[#999999] hover:text-[#F0F0F0] hover:bg-white/5 border border-transparent font-normal"
+                  }`}
                 title="Use multi-stage Gemini AI translation prompts (slower, may vary)"
               >
                 <Sparkles className="h-3 w-3" />
@@ -2598,7 +2609,7 @@ export default function Home() {
                   placeholder="Describe diagram modifications..."
                   className="w-full h-16 bg-white/5 border border-white/10 rounded-lg p-2 text-xs text-[#F0F0F0] placeholder-[#999999]/35 focus:outline-none focus:border-[#d4ff00] resize-none"
                 />
-                
+
                 {/* Copilot File Attachment Indicator */}
                 <div className="flex items-center justify-between text-[10px] text-[#999999] py-0.5">
                   {selectedFile ? (
@@ -2780,7 +2791,7 @@ export default function Home() {
         {/* MAIN BODY AREA FOR ACTIVE TAB */}
         <div className="flex-1 relative overflow-hidden bg-[#0A0A0A]">
           <AnimatePresence mode="wait">
-            
+
             {/* 1. DIAGRAM INTERACTIVE CANVAS */}
             {activeTab === "diagram" && (
               <motion.div
@@ -2808,7 +2819,7 @@ export default function Home() {
 
                 {/* Split Interactive View Layout */}
                 <div className="flex-1 w-full h-full flex flex-col md:flex-row overflow-hidden">
-                  
+
                   {/* Viewport canvas element */}
                   <div
                     ref={containerRef}
@@ -2946,7 +2957,7 @@ export default function Home() {
                           title="Push diagram to GitHub repository"
                         >
                           <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor">
-                            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
                           </svg>
                           GitHub
                         </button>
@@ -3004,11 +3015,11 @@ export default function Home() {
 
                       {/* Side-Panel Scrollable Content */}
                       <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                        
+
                         {/* TAB A: PROPERTIES CUSTOMIZER */}
                         {rightPanelTab === "inspector" && (
                           <div className="space-y-4">
-                            
+
                             {/* 1. Component Editor Header */}
                             <div className="space-y-2.5">
                               <label className="text-[10px] font-bold text-[#999999] uppercase tracking-wider block">
@@ -3139,7 +3150,7 @@ export default function Home() {
                             {/* 2. New Component Tool */}
                             <div className="bg-white/5 border border-white/5 rounded-xl p-3.5 space-y-3">
                               <span className="text-[10px] font-bold text-[#d4ff00] uppercase tracking-wider block">Add Custom Component</span>
-                              
+
                               <div className="space-y-1">
                                 <span className="text-[9px] font-medium text-[#999999] uppercase tracking-wider block">Component Name</span>
                                 <input
@@ -3209,7 +3220,7 @@ export default function Home() {
                             {/* 3. New Communication Edge Linker */}
                             <div className="bg-white/5 border border-white/5 rounded-xl p-3.5 space-y-3 font-mono">
                               <span className="text-[10px] font-bold text-[#d4ff00] uppercase tracking-wider block font-sans">Wire Connection Link</span>
-                              
+
                               <div className="grid grid-cols-2 gap-2">
                                 <div className="space-y-1">
                                   <span className="text-[9px] text-[#999999] uppercase tracking-wider block font-sans">Source Node</span>
@@ -3276,22 +3287,20 @@ export default function Home() {
                                 {getArchitectureScanResults(lastBlueprint).map((report) => (
                                   <div
                                     key={report.id}
-                                    className={`p-3.5 rounded-xl border flex flex-col space-y-2.5 ${
-                                      report.type === "high"
-                                        ? "bg-red-500/5 border-red-500/20 shadow-[0_2px_12px_rgba(239,68,68,0.05)]"
-                                        : report.type === "medium"
+                                    className={`p-3.5 rounded-xl border flex flex-col space-y-2.5 ${report.type === "high"
+                                      ? "bg-red-500/5 border-red-500/20 shadow-[0_2px_12px_rgba(239,68,68,0.05)]"
+                                      : report.type === "medium"
                                         ? "bg-amber-500/5 border-amber-500/20 shadow-[0_2px_12px_rgba(245,158,11,0.05)]"
                                         : "bg-white/5 border-white/10"
-                                    }`}
+                                      }`}
                                   >
                                     <div className="flex items-start gap-2.5">
-                                      <div className={`mt-0.5 h-4 w-4 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                                        report.type === "high"
-                                          ? "bg-red-500/20 text-red-400"
-                                          : report.type === "medium"
+                                      <div className={`mt-0.5 h-4 w-4 rounded-full flex items-center justify-center text-[10px] font-bold ${report.type === "high"
+                                        ? "bg-red-500/20 text-red-400"
+                                        : report.type === "medium"
                                           ? "bg-amber-500/20 text-amber-400"
                                           : "bg-white/10 text-white"
-                                      }`}>
+                                        }`}>
                                         !
                                       </div>
                                       <div className="space-y-1 flex-1">
@@ -3398,8 +3407,8 @@ export default function Home() {
                                   }
                                   return list;
                                 })().length === 0 && (
-                                  <p className="text-[9px] text-[#999999]/40 italic">No subsystems inserted yet.</p>
-                                )}
+                                    <p className="text-[9px] text-[#999999]/40 italic">No subsystems inserted yet.</p>
+                                  )}
                               </div>
                             </div>
 
@@ -3529,11 +3538,10 @@ export default function Home() {
 
                                       <div className="flex items-center gap-2 flex-shrink-0">
                                         <span
-                                          className={`text-[8px] font-bold font-mono px-1.5 py-0.5 rounded border uppercase tracking-wider ${
-                                            isManual
-                                              ? "bg-[#d4ff00]/10 text-[#d4ff00] border-[#d4ff00]/25"
-                                              : "bg-white/5 text-[#999999] border-white/10"
-                                          }`}
+                                          className={`text-[8px] font-bold font-mono px-1.5 py-0.5 rounded border uppercase tracking-wider ${isManual
+                                            ? "bg-[#d4ff00]/10 text-[#d4ff00] border-[#d4ff00]/25"
+                                            : "bg-white/5 text-[#999999] border-white/10"
+                                            }`}
                                         >
                                           {isManual ? "manual" : "auto"}
                                         </span>
@@ -3657,9 +3665,8 @@ export default function Home() {
                                               {category} ({items.length})
                                             </span>
                                             <ChevronRight
-                                              className={`h-3 w-3 transition-transform ${
-                                                isCollapsed ? "" : "rotate-90"
-                                              }`}
+                                              className={`h-3 w-3 transition-transform ${isCollapsed ? "" : "rotate-90"
+                                                }`}
                                             />
                                           </button>
 
@@ -3843,7 +3850,7 @@ export default function Home() {
                           title="Push diagram to GitHub repository"
                         >
                           <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
-                            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
                           </svg>
                           GitHub
                         </button>
@@ -3864,7 +3871,7 @@ export default function Home() {
 
                 {/* Draw.io editor states wrapper */}
                 <div className="flex-1 w-full h-full relative">
-                  
+
                   {/* Empty state overlay */}
                   {drawioStatus === "empty" && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center p-6 space-y-4 bg-[#0A0A0A] z-10">
@@ -4132,7 +4139,7 @@ export default function Home() {
                       <div className="flex items-start gap-4">
                         <div className="h-10 w-10 rounded-full bg-[#d4ff00]/15 text-[#d4ff00] border border-[#d4ff00]/30 flex items-center justify-center flex-shrink-0">
                           <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor">
-                            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
                           </svg>
                         </div>
                         <div className="space-y-1.5 flex-1">
@@ -4148,7 +4155,7 @@ export default function Home() {
                         className="w-full py-2.5 bg-[#d4ff00]/10 hover:bg-[#d4ff00]/20 disabled:opacity-40 text-xs font-bold text-[#d4ff00] rounded-xl border border-[#d4ff00]/30 cursor-pointer transition flex items-center justify-center gap-2"
                       >
                         <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                          <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
                         </svg>
                         Push to GitHub
                       </button>
@@ -4179,7 +4186,7 @@ export default function Home() {
             >
               {toast.isErr ? (
                 <AlertTriangle className="h-4.5 w-4.5 text-red-500" />
-               ) : (
+              ) : (
                 <Check className="h-4.5 w-4.5 text-[#d4ff00]" />
               )}
               <span className="text-xs font-semibold">{toast.message}</span>
@@ -4210,7 +4217,7 @@ export default function Home() {
                 <div className="flex items-center gap-3">
                   <div className="h-8 w-8 rounded-full bg-[#d4ff00]/10 text-[#d4ff00] border border-[#d4ff00]/20 flex items-center justify-center">
                     <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
                     </svg>
                   </div>
                   <h3 className="text-sm font-bold text-[#F0F0F0]">Push to GitHub</h3>
@@ -4220,7 +4227,7 @@ export default function Home() {
                   className="p-1.5 hover:bg-white/5 rounded-lg transition cursor-pointer"
                 >
                   <svg className="h-4 w-4 text-[#999999]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M18 6L6 18M6 6l12 12"/>
+                    <path d="M18 6L6 18M6 6l12 12" />
                   </svg>
                 </button>
               </div>
@@ -4245,11 +4252,10 @@ export default function Home() {
                             return `${basePath}${opt.ext}`;
                           });
                         }}
-                        className={`py-2 text-[10px] font-semibold rounded-lg transition-all cursor-pointer ${
-                          githubExportType === opt.id
-                            ? "bg-[#d4ff00]/15 text-[#d4ff00] border border-[#d4ff00]/25"
-                            : "text-[#999999] hover:text-[#F0F0F0] border border-transparent"
-                        }`}
+                        className={`py-2 text-[10px] font-semibold rounded-lg transition-all cursor-pointer ${githubExportType === opt.id
+                          ? "bg-[#d4ff00]/15 text-[#d4ff00] border border-[#d4ff00]/25"
+                          : "text-[#999999] hover:text-[#F0F0F0] border border-transparent"
+                          }`}
                       >
                         {opt.label}
                       </button>
@@ -4343,7 +4349,7 @@ export default function Home() {
                   ) : (
                     <>
                       <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                        <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
                       </svg>
                       Push to GitHub
                     </>
