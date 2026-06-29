@@ -1308,7 +1308,8 @@ export default function Home() {
       "%%{", "C4Context", "C4Container", "C4Component",
       "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
       "flowchart", "mindmap", "quadrantChart", "gantt", "timeline",
-      // Direction
+      // Direction keyword + direction values (critical for C4 diagrams)
+      "direction TD", "direction LR", "direction TB", "direction BT", "direction RL",
       "direction",
       // C4 function keywords (followed by `(`)
       "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
@@ -1316,6 +1317,8 @@ export default function Home() {
       "System_Boundary", "Container_Boundary",
       "ContainerDb", "ContainerQueue",
       "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
+      "Container", "Component", "Boundary",
+      "Person", "System", "Rel",
       "LAYOUT_WITH_LEGEND",
       // Plain keywords
       "subgraph", "classDef", "participant", "actor",
@@ -1336,23 +1339,28 @@ export default function Home() {
       // For each keyword, if it appears anywhere in the line NOT at position 0
       // (meaning it's squashed after something), inject a newline before it.
       // We do this iteratively until stable.
-      for (let pass = 0; pass < 5; pass++) {
+      for (let pass = 0; pass < 10; pass++) {
         let changed = false;
         for (const kw of sortedKeywords) {
           // Skip graph — too short and causes false positives in labels
           if (kw === "graph") continue;
           const idx = result.indexOf(kw);
-          if (idx > 0) {
-            // Only split if the char before is NOT a newline and the keyword is
-            // not inside a quoted string
-            const before = result.slice(0, idx);
-            const after = result.slice(idx);
-            // Check we're not inside quotes by counting unescaped quotes before idx
-            const quoteCount = (before.match(/"/g) || []).length;
-            if (quoteCount % 2 === 0) {
-              result = before.trimEnd() + "\n" + after;
-              changed = true;
-              break; // restart the keyword scan on the new first segment
+          // Only split if keyword exists AND is NOT at the start of a line
+          // (idx === 0 means at string start, result[idx-1] === '\n' means at line start)
+          if (idx >= 0) {
+            const isAtLineStart = idx === 0 || result[idx - 1] === '\n';
+            if (!isAtLineStart) {
+              // Only split if the char before is NOT a newline and the keyword is
+              // not inside a quoted string
+              const before = result.slice(0, idx);
+              const after = result.slice(idx);
+              // Check we're not inside quotes by counting unescaped quotes before idx
+              const quoteCount = (before.match(/"/g) || []).length;
+              if (quoteCount % 2 === 0) {
+                result = before.trimEnd() + "\n" + after;
+                changed = true;
+                break; // restart the keyword scan on the new first segment
+              }
             }
           }
         }
@@ -1633,12 +1641,15 @@ export default function Home() {
         "C4Context", "C4Container", "C4Component",
         "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
         "flowchart", "mindmap", "quadrantChart", "gantt", "timeline",
+        "direction TD", "direction LR", "direction TB", "direction BT", "direction RL",
         "direction",
         "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
         "ContainerDb_Ext", "ContainerQueue_Ext",
         "System_Boundary", "Container_Boundary",
         "ContainerDb", "ContainerQueue",
         "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
+        "Container", "Component", "Boundary",
+        "Person", "System", "Rel",
         "LAYOUT_WITH_LEGEND", "subgraph", "classDef", "participant", "actor",
         "title", "section",
       ].sort((a, b) => b.length - a.length);
@@ -1646,18 +1657,22 @@ export default function Home() {
       const lines2 = s.split("\n").flatMap((line) => {
         if (!line.trim() || line.trim().startsWith("%%")) return [line];
         let result = line;
-        for (let pass = 0; pass < 5; pass++) {
+        for (let pass = 0; pass < 10; pass++) {
           let changed = false;
           for (const kw of INNER_KEYWORDS) {
             const idx = result.indexOf(kw);
-            if (idx > 0) {
-              const before = result.slice(0, idx);
-              const after = result.slice(idx);
-              const quoteCount = (before.match(/"/g) || []).length;
-              if (quoteCount % 2 === 0) {
-                result = before.trimEnd() + "\n" + after;
-                changed = true;
-                break;
+            // Only split if keyword exists AND is NOT at the start of a line
+            if (idx >= 0) {
+              const isAtLineStart = idx === 0 || result[idx - 1] === '\n';
+              if (!isAtLineStart) {
+                const before = result.slice(0, idx);
+                const after = result.slice(idx);
+                const quoteCount = (before.match(/"/g) || []).length;
+                if (quoteCount % 2 === 0) {
+                  result = before.trimEnd() + "\n" + after;
+                  changed = true;
+                  break;
+                }
               }
             }
           }
@@ -1708,12 +1723,15 @@ export default function Home() {
       "C4Context", "C4Container", "C4Component",
       "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
       "flowchart", "mindmap", "quadrantChart", "gantt", "timeline",
+      "direction TD", "direction LR", "direction TB", "direction BT", "direction RL",
       "direction",
       "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
       "ContainerDb_Ext", "ContainerQueue_Ext",
       "System_Boundary", "Container_Boundary",
       "ContainerDb", "ContainerQueue",
       "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
+      "Container", "Component", "Boundary",
+      "Person", "System", "Rel",
       "LAYOUT_WITH_LEGEND", "subgraph", "classDef", "participant", "actor",
       "title", "section",
     ].sort((a, b) => b.length - a.length);
@@ -1721,18 +1739,22 @@ export default function Home() {
     const emergencyLines = finalCode.split("\n").flatMap((line) => {
       if (!line.trim() || line.trim().startsWith("%%")) return [line];
       let result = line;
-      for (let pass = 0; pass < 5; pass++) {
+      for (let pass = 0; pass < 10; pass++) {
         let changed = false;
         for (const kw of EMERGENCY_KEYWORDS) {
           const idx = result.indexOf(kw);
-          if (idx > 0) {
-            const before = result.slice(0, idx);
-            const after = result.slice(idx);
-            const quoteCount = (before.match(/"/g) || []).length;
-            if (quoteCount % 2 === 0) {
-              result = before.trimEnd() + "\n" + after;
-              changed = true;
-              break;
+          // Only split if keyword exists AND is NOT at the start of a line
+          if (idx >= 0) {
+            const isAtLineStart = idx === 0 || result[idx - 1] === '\n';
+            if (!isAtLineStart) {
+              const before = result.slice(0, idx);
+              const after = result.slice(idx);
+              const quoteCount = (before.match(/"/g) || []).length;
+              if (quoteCount % 2 === 0) {
+                result = before.trimEnd() + "\n" + after;
+                changed = true;
+                break;
+              }
             }
           }
         }
@@ -1759,18 +1781,22 @@ export default function Home() {
           const repairedLines = guardedCode.split("\n").flatMap((line) => {
             if (!line.trim() || line.trim().startsWith("%%")) return [line];
             let result = line;
-            for (let pass = 0; pass < 5; pass++) {
+            for (let pass = 0; pass < 10; pass++) {
               let changed = false;
               for (const kw of EMERGENCY_KEYWORDS) {
                 const idx = result.indexOf(kw);
-                if (idx > 0) {
-                  const before = result.slice(0, idx);
-                  const after = result.slice(idx);
-                  const quoteCount = (before.match(/"/g) || []).length;
-                  if (quoteCount % 2 === 0) {
-                    result = before.trimEnd() + "\n" + after;
-                    changed = true;
-                    break;
+                // Only split if keyword exists AND is NOT at the start of a line
+                if (idx >= 0) {
+                  const isAtLineStart = idx === 0 || result[idx - 1] === '\n';
+                  if (!isAtLineStart) {
+                    const before = result.slice(0, idx);
+                    const after = result.slice(idx);
+                    const quoteCount = (before.match(/"/g) || []).length;
+                    if (quoteCount % 2 === 0) {
+                      result = before.trimEnd() + "\n" + after;
+                      changed = true;
+                      break;
+                    }
                   }
                 }
               }
