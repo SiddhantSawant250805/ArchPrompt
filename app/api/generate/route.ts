@@ -353,16 +353,23 @@ function sanitizeContent(text: string): string {
       }
 
 
-      // Special: direction TD/LR/TB/BT/RL — three passes:
+      // Special: direction TD/LR/TB/BT/RL — multiple passes to handle all squashing scenarios:
       //  1a. Split any word-char IMMEDIATELY before `direction` (e.g. Platformdirection → Platform\ndirection).
       //      Uses \w instead of [^\n] so it fires even when direction is squashed mid-word.
-      //  1b. Also split non-word, non-newline chars before direction (e.g. )direction → )\ndirection).
+      //  1b. Also split closing brackets/parens before direction (e.g. )direction → )\ndirection).
       //  2.  Split any word-char IMMEDIATELY after the direction value (e.g. direction TDSystem_ → direction TD\nSystem_).
       //  3.  Handle direction with NO space before the value (e.g. directionTD → direction TD).
+      //  4.  Split opening brackets/parens after direction value (e.g. direction TDSystem( → direction TD\nSystem().
+      //  5.  Handle underscore immediately after TD (TD_) and before direction (Platformdirection).
+      //  6.  Handle title followed by any text then direction (e.g., title Textdirection → title Text\ndirection).
       seg = seg.replace(/(\w)(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
-      seg = seg.replace(/([^\n\w])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+      seg = seg.replace(/([)\]}>])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+      seg = seg.replace(/([^\n\w)\]}>])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
       seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))(\w)/gi, "$1\n$2");
+      seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))([([{<_])/gi, "$1\n$2");
       seg = seg.replace(/(direction)(TD|LR|TB|BT|RL)/gi, "$1 $2");
+      // Handle underscore directly after the direction value (TD_System → TD\n_System)
+      seg = seg.replace(/((?:TD|LR|TB|BT|RL))(_)/gi, "$1\n$2");
 
 
       // Category 3 — plain keywords.
@@ -407,8 +414,14 @@ function sanitizeContent(text: string): string {
   //    (e.g. inside an odd-split quoted segment, or zero-space directionTD).
   const DIR = "(?:TD|LR|TB|BT|RL)";
   clean = clean.replace(new RegExp(`(\\w)(direction\\s+${DIR})`, "gi"), "$1\n$2");
+  clean = clean.replace(new RegExp(`([)\\]}>])(direction\\s+${DIR})`, "gi"), "$1\n$2");
   clean = clean.replace(new RegExp(`(direction\\s+${DIR})(\\w)`, "gi"), "$1\n$2");
+  clean = clean.replace(new RegExp(`(direction\\s+${DIR})([([{<_])`, "gi"), "$1\n$2");
   clean = clean.replace(new RegExp(`(direction)(${DIR})`, "gi"), "$1 $2");
+  // Handle underscore directly after the direction value (TD_System → TD\n_System)
+  clean = clean.replace(new RegExp(`(${DIR})(_)`, "gi"), "$1\n$2");
+  // Handle title followed by any word then direction
+  clean = clean.replace(new RegExp(`(title\\s+[^\\n]+?)(direction)`, "gi"), "$1\n$2");
 
   // 1. flowchart/graph + direction squashed against subgraph / end.
   //    Use explicit direction alternation instead of \w+ so "TD" isn't

@@ -1386,9 +1386,11 @@ export default function Home() {
         // Pass 4: word-char directly after direction value
         seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))(\w)/gi, "$1\n$2");
         // Pass 5: opening paren/bracket after direction value  ← KEY FIX
-        seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))([\(\[\{])/gi, "$1\n$2");
+        seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))([([{<_])/gi, "$1\n$2");
         // Pass 6: no-space directionTD → direction TD
         seg = seg.replace(/(direction)(TD|LR|TB|BT|RL)/gi, "$1 $2");
+        // Pass 7: underscore directly after the direction value (TD_System → TD\n_System)
+        seg = seg.replace(/((?:TD|LR|TB|BT|RL))(_)/gi, "$1\n$2");
 
         // ── Plain keywords ──
         for (const kw of PLAIN_KEYWORDS) {
@@ -1430,7 +1432,11 @@ export default function Home() {
     // Word-char after direction value
     clean = clean.replace(new RegExp(`(direction\\s+${DIR})(\\w)`, "gi"), "$1\n$2");
     // Opening bracket/paren after direction value  ← NEW
-    clean = clean.replace(new RegExp(`(direction\\s+${DIR})([([{])`, "gi"), "$1\n$2");
+    clean = clean.replace(new RegExp(`(direction\\s+${DIR})([([{<_])`, "gi"), "$1\n$2");
+    // Handle underscore directly after the direction value (TD_System → TD\n_System)
+    clean = clean.replace(new RegExp(`(${DIR})(_)`, "gi"), "$1\n$2");
+    // Handle title followed by any word then direction
+    clean = clean.replace(new RegExp(`(title\\s+[^\\n]+?)(direction)`, "gi"), "$1\n$2");
 
     // 1. flowchart/graph + direction squashed against subgraph / end / another graph keyword.
     //    IMPORTANT: use explicit direction alternation instead of \w+ so "TD" doesn't
@@ -1554,8 +1560,12 @@ export default function Home() {
       s = s.replace(new RegExp(`(\\w)(direction\\s+${DIR_ALT})`, "gi"), "$1\n$2");
       s = s.replace(new RegExp(`([)\\]}>])(direction\\s+${DIR_ALT})`, "gi"), "$1\n$2");
       s = s.replace(new RegExp(`(direction\\s+${DIR_ALT})(\\w)`, "gi"), "$1\n$2");
-      s = s.replace(new RegExp(`(direction\\s+${DIR_ALT})([\\(\\[\\{<])`, "gi"), "$1\n$2");
+      s = s.replace(new RegExp(`(direction\\s+${DIR_ALT})([([{<_])`, "gi"), "$1\n$2");
       s = s.replace(new RegExp(`(direction)(${DIR_ALT})`, "gi"), "$1 $2");
+      // Handle underscore directly after the direction value (TD_System → TD\n_System)
+      s = s.replace(new RegExp(`(${DIR_ALT})(_)`, "gi"), "$1\n$2");
+      // Handle title followed by any word then direction
+      s = s.replace(new RegExp(`(title\\s+[^\\n]+?)(direction)`, "gi"), "$1\n$2");
 
       // end keyword always on its own line
       s = s.replace(/([^\n])\b(end)\b(\s*\n)/gi, "$1\nend\n");
@@ -1582,17 +1592,26 @@ export default function Home() {
     const m = (window as any).mermaid;
     const renderId = "mermaid-render-" + Math.random().toString(36).substring(2, 9);
     // Emergency line-by-line guard: split any line that still has
-    // a direction keyword squashed against surrounding text
+    // a direction keyword squashed against surrounding text, or
+    // a title followed by another statement on same line
     const emergencyLines = finalCode.split("\n").flatMap((line) => {
-      // If a line contains direction mid-text (not as the whole line), split it
+      // Split direction when it appears mid-text
       const dirMatch = line.match(
-        /^(.*?[^\n])(direction\s+(?:TD|LR|TB|BT|RL))(.*?)$/i
+        /^(.*?[^\n])(direction\s+(?:TD|LR|TB|BT|RL))(.*)$/i
       );
       if (dirMatch && dirMatch[1].trim() !== "" && dirMatch[3].trim() !== "") {
         return [dirMatch[1], dirMatch[2], dirMatch[3]].filter(Boolean);
       }
       if (dirMatch && dirMatch[1].trim() !== "") {
         return [dirMatch[1], dirMatch[2] + dirMatch[3]].filter(Boolean);
+      }
+      // Handle title followed by any keyword on same line (e.g. "title Textdirection TD" or "title TextPerson...")
+      const titleMatch = line.match(/^(title\s+[^\n]+?)(?=\s*(?:direction|Person|System|Container|subgraph|end|classDef|participant|$))/i);
+      if (titleMatch && line !== titleMatch[1]) {
+        const rest = line.slice(titleMatch[1].length).trim();
+        if (rest) {
+          return [titleMatch[1], rest];
+        }
       }
       return [line];
     });
