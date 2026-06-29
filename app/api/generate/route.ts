@@ -326,15 +326,22 @@ function sanitizeContent(text: string): string {
   // keyword found mid-line. Handles all squash patterns including
   // "title Microservices Platformdirection TDSystem_boundary(...)".
   const ROUTE_TOKEN_KEYWORDS = [
+    // Diagram declarations
     "C4Context", "C4Container", "C4Component",
     "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
     "flowchart", "mindmap", "quadrantChart", "gantt", "timeline",
+    // Direction keyword + direction values (critical for C4 diagrams)
+    "direction TD", "direction LR", "direction TB", "direction BT", "direction RL",
     "direction",
+    // C4 function keywords (longest first to avoid partial matches)
     "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
     "ContainerDb_Ext", "ContainerQueue_Ext",
     "System_Boundary", "Container_Boundary",
     "ContainerDb", "ContainerQueue",
     "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
+    "Container", "Component", "Boundary",
+    "Person", "System", "Rel",
+    // Other keywords
     "LAYOUT_WITH_LEGEND", "subgraph", "classDef", "participant", "actor",
     "title", "section",
   ].sort((a: string, b: string) => b.length - a.length);
@@ -342,18 +349,23 @@ function sanitizeContent(text: string): string {
   const routeReconstructed = clean.split("\n").flatMap((line: string) => {
     if (!line.trim() || line.trim().startsWith("%%")) return [line];
     let result = line;
-    for (let pass = 0; pass < 5; pass++) {
+    for (let pass = 0; pass < 10; pass++) {
       let changed = false;
       for (const kw of ROUTE_TOKEN_KEYWORDS) {
         const idx = result.indexOf(kw);
-        if (idx > 0) {
-          const before = result.slice(0, idx);
-          const after = result.slice(idx);
-          const quoteCount = (before.match(/"/g) || []).length;
-          if (quoteCount % 2 === 0) {
-            result = before.trimEnd() + "\n" + after;
-            changed = true;
-            break;
+        // Only split if keyword exists AND is NOT at the start of a line
+        // (idx === 0 means at string start, result[idx-1] === '\n' means at line start)
+        if (idx >= 0) {
+          const isAtLineStart = idx === 0 || result[idx - 1] === '\n';
+          if (!isAtLineStart) {
+            const before = result.slice(0, idx);
+            const after = result.slice(idx);
+            const quoteCount = (before.match(/"/g) || []).length;
+            if (quoteCount % 2 === 0) {
+              result = before.trimEnd() + "\n" + after;
+              changed = true;
+              break;
+            }
           }
         }
       }
