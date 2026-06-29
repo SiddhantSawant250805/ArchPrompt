@@ -321,59 +321,67 @@ function sanitizeContent(text: string): string {
   // Normalize line endings
   clean = clean.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
-  // ── STEP 0: Token-based line reconstruction ──────────────────────────────
-  // Tokenize by every known Mermaid keyword and inject newlines before any
-  // keyword found mid-line. Handles all squash patterns including
-  // "title Microservices Platformdirection TDSystem_boundary(...)".
-  const ROUTE_TOKEN_KEYWORDS = [
-    // Diagram declarations
-    "C4Context", "C4Container", "C4Component",
-    "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
-    "flowchart", "mindmap", "quadrantChart", "gantt", "timeline",
-    // Direction keyword + direction values (critical for C4 diagrams)
-    "direction TD", "direction LR", "direction TB", "direction BT", "direction RL",
-    "direction",
-    // C4 function keywords (longest first to avoid partial matches)
-    "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
-    "ContainerDb_Ext", "ContainerQueue_Ext",
-    "System_Boundary", "Container_Boundary",
-    "ContainerDb", "ContainerQueue",
-    "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
-    "Container", "Component", "Boundary",
-    "Person", "System", "Rel",
-    // Other keywords
-    "LAYOUT_WITH_LEGEND", "subgraph", "classDef", "participant", "actor",
-    "title", "section",
-  ].sort((a: string, b: string) => b.length - a.length);
-
-  const routeReconstructed = clean.split("\n").flatMap((line: string) => {
-    if (!line.trim() || line.trim().startsWith("%%")) return [line];
-    let result = line;
-    for (let pass = 0; pass < 10; pass++) {
-      let changed = false;
-      for (const kw of ROUTE_TOKEN_KEYWORDS) {
-        const idx = result.indexOf(kw);
-        // Only split if keyword exists AND is NOT at the start of a line
-        // (idx === 0 means at string start, result[idx-1] === '\n' means at line start)
-        if (idx >= 0) {
-          const isAtLineStart = idx === 0 || result[idx - 1] === '\n';
-          if (!isAtLineStart) {
-            const before = result.slice(0, idx);
-            const after = result.slice(idx);
-            const quoteCount = (before.match(/"/g) || []).length;
-            if (quoteCount % 2 === 0) {
-              result = before.trimEnd() + "\n" + after;
-              changed = true;
-              break;
-            }
-          }
-        }
-      }
-      if (!changed) break;
+  // ── STEP 0: Direct regex keyword injection ────────────────────────────────
+  // Targeted pre-pass first — handles the specific crash pattern
+  // "Xdirection TDKeyword(" before the general loop runs.
+  {
+    const DIR_KW = [
+      "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
+      "ContainerDb_Ext", "ContainerQueue_Ext", "System_Boundary", "Container_Boundary",
+      "ContainerDb", "ContainerQueue", "Rel_Back", "Rel_Neighbor",
+      "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
+      "Container", "Component", "Boundary",
+      "Person", "System", "Rel",
+      "title", "subgraph", "classDef", "participant", "actor", "section",
+      "LAYOUT_WITH_LEGEND", "C4Context", "C4Container", "C4Component",
+      "flowchart", "sequenceDiagram", "erDiagram", "classDiagram",
+    ];
+    clean = clean.replace(/([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi, (m: string, a: string, b: string) => a + "\n" + b);
+    clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))([^\n\s])/gi, (m: string, a: string, b: string) => a + "\n" + b);
+    for (const kw of DIR_KW) {
+      clean = clean.replace(
+        new RegExp(`(direction\\s+(?:TD|LR|TB|BT|RL))\\s*(${kw}\\b)`, "gi"),
+        (m: string, a: string, b: string) => a + "\n" + b
+      );
+      clean = clean.replace(
+        new RegExp(`(\\w)(${kw}\\s*\\()`, "g"),
+        (m: string, a: string, b: string) => a + "\n" + b
+      );
     }
-    return result.split("\n");
-  });
-  clean = routeReconstructed.join("\n");
+  }
+
+  // General pattern loop — fresh regex instances each pass to avoid stale lastIndex
+  const makeRoutePatterns = (): RegExp[] => [
+    /([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi,
+    /([^\n])(%%\{)/g,
+    /([^\n])(C4Container\b)/g, /([^\n])(C4Component\b)/g, /([^\n])(C4Context\b)/g,
+    /([^\n])(sequenceDiagram\b)/g, /([^\n])(erDiagram\b)/g,
+    /([^\n])(classDiagram\b)/g, /([^\n])(stateDiagram-v2\b)/g,
+    /([^\n])(flowchart\s)/g, /([^\n])(mindmap\b)/g,
+    /([^\n])(quadrantChart\b)/g, /([^\n])(gantt\b)/g, /([^\n])(timeline\b)/g,
+    /([^\n])(Person_Ext\s*\()/g, /([^\n])(System_Ext\s*\()/g,
+    /([^\n])(Container_Ext\s*\()/g, /([^\n])(Component_Ext\s*\()/g,
+    /([^\n])(ContainerDb_Ext\s*\()/g, /([^\n])(ContainerQueue_Ext\s*\()/g,
+    /([^\n])(System_Boundary\s*\()/g, /([^\n])(Container_Boundary\s*\()/g,
+    /([^\n])(ContainerDb\s*\()/g, /([^\n])(ContainerQueue\s*\()/g,
+    /([^\n])(Rel_Back\s*\()/g, /([^\n])(Rel_Neighbor\s*\()/g,
+    /([^\n])(Rel_Up\s*\()/g, /([^\n])(Rel_Down\s*\()/g,
+    /([^\n])(Rel_Left\s*\()/g, /([^\n])(Rel_Right\s*\()/g,
+    /([^\n])(Container\s*\()/g, /([^\n])(Component\s*\()/g,
+    /([^\n])(Boundary\s*\()/g,
+    /([^\n])(Person\s*\()/g, /([^\n])(System\s*\()/g, /([^\n])(Rel\s*\()/g,
+    /([^\n])(LAYOUT_WITH_LEGEND)/g,
+    /([^\n])(subgraph\s)/g, /([^\n])(classDef\s)/g,
+    /([^\n])(participant\s)/g, /([^\n])(actor\s)/g,
+    /([^\n])(title\s)/g, /([^\n])(section\s)/g,
+  ];
+  for (let pass = 0; pass < 30; pass++) {
+    const prev = clean;
+    const patterns = makeRoutePatterns();
+    for (const p of patterns) clean = clean.replace(p, (m: string, a: string, b: string) => a + "\n" + b);
+    if (clean === prev) break;
+  }
+  clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n])/gi, (m: string, a: string, b: string) => a + "\n" + b);
   // ── END STEP 0 ───────────────────────────────────────────────────────────
 
   // ── Category 1: Diagram-type declarations ────────────────────────────────
@@ -398,8 +406,6 @@ function sanitizeContent(text: string): string {
   ];
 
   // ── Category 3: Plain Mermaid keywords ───────────────────────────────────
-  // Preceded by whitespace in valid Mermaid but may be squashed after word chars.
-  // Use negative lookbehind (?<!\w) instead of \b to handle word-char→keyword.
   const PLAIN_KEYWORDS = [
     "direction",
     "classDef", "class",
@@ -410,9 +416,6 @@ function sanitizeContent(text: string): string {
   ];
 
   // ── Category 4: Structural block keywords ────────────────────────────────
-  // subgraph and end MUST always start on a fresh line regardless of what
-  // character precedes them. They can appear after a word char ("TDsubgraph")
-  // so (?<![\w]) lookbehind would block the match. Use unconditional pattern.
   const STRUCTURAL_KEYWORDS = ["subgraph"];
 
   /**
@@ -714,7 +717,13 @@ export async function POST(req: NextRequest) {
       });
 
       const cleanJson = sanitizeContent(text);
-      const parsed = JSON.parse(cleanJson);
+      let parsed: any;
+      try {
+        parsed = JSON.parse(cleanJson);
+      } catch (parseErr: any) {
+        console.error("Stage 1: AI returned malformed JSON:", cleanJson.slice(0, 300));
+        return NextResponse.json({ error: `AI returned malformed JSON. Try again. (${parseErr.message})` }, { status: 500 });
+      }
 
       return NextResponse.json({ blueprint: parsed });
 
@@ -818,7 +827,13 @@ export async function POST(req: NextRequest) {
       });
 
       const cleanJson = sanitizeContent(text);
-      const parsed = JSON.parse(cleanJson);
+      let parsed: any;
+      try {
+        parsed = JSON.parse(cleanJson);
+      } catch (parseErr: any) {
+        console.error("Stage 4: AI returned malformed JSON:", cleanJson.slice(0, 300));
+        return NextResponse.json({ error: `AI returned malformed JSON. Try again. (${parseErr.message})` }, { status: 500 });
+      }
 
       return NextResponse.json({ blueprint: parsed });
 

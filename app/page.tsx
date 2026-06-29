@@ -751,8 +751,9 @@ export default function Home() {
       });
 
       if (!s2Res.ok) {
-        const errJson = await s2Res.json();
-        throw new Error(errJson.error || "Failed to compile Mermaid representation.");
+        let errMsg = "Failed to compile Mermaid representation.";
+        try { const j = await s2Res.json(); errMsg = j.error || errMsg; } catch { errMsg = `Server error ${s2Res.status}`; }
+        throw new Error(errMsg);
       }
 
       const { code } = await s2Res.json();
@@ -965,8 +966,9 @@ export default function Home() {
       });
 
       if (!s1Res.ok) {
-        const errJson = await s1Res.json();
-        throw new Error(errJson.error || "Failed parsing system layout structure.");
+        let errMsg = "Failed parsing system layout structure.";
+        try { const j = await s1Res.json(); errMsg = j.error || errMsg; } catch { errMsg = `Server error ${s1Res.status}`; }
+        throw new Error(errMsg);
       }
 
       const { blueprint } = await s1Res.json();
@@ -1020,8 +1022,9 @@ export default function Home() {
       });
 
       if (!res.ok) {
-        const errJson = await res.json();
-        throw new Error(errJson.error || "AI refinement failed.");
+        let errMsg = "AI refinement failed.";
+        try { const j = await res.json(); errMsg = j.error || errMsg; } catch { errMsg = `Server error ${res.status}`; }
+        throw new Error(errMsg);
       }
 
       const { blueprint: updatedBlueprint } = await res.json();
@@ -1294,276 +1297,180 @@ export default function Home() {
   // ----------------------------------------------------
   // CLIENT MERMAID GENERATOR RENDERER
   // ----------------------------------------------------
+  // ─────────────────────────────────────────────────────────────────────────
+  // MERMAID HELPERS — sanitizeId, escapeLabel, ensureHeader, validateMermaid
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** Strip any character that isn't alphanumeric or underscore from a node ID.
+   *  If the result starts with a digit, prefix with "n". */
+  const sanitizeId = (s: string): string => {
+    const cleaned = String(s).replace(/[^\w]/g, "").replace(/^\d/, (d) => `n${d}`);
+    return cleaned || "node";
+  };
+
+  /** Escape double-quotes inside a display label so it can be safely wrapped
+   *  in double-quotes in Mermaid syntax. */
+  const escapeLabel = (s: string): string =>
+    String(s).replace(/"/g, '\\"');
+
+  /** VALID_HEADER_RE matches the first non-comment line of any diagram type.
+   *  Uses multiline flag and allows optional leading whitespace. */
+  const VALID_HEADER_RE =
+    /^\s*(?:%%\{[\s\S]*?%%\s*\n\s*)?(?:flowchart|graph|sequenceDiagram|erDiagram|classDiagram|stateDiagram-v2|C4Context|C4Container|C4Component|mindmap|quadrantChart|gantt|timeline)/m;
+
+  /** Prepend a default flowchart TD header when the generated code lacks one. */
+  const ensureHeader = (code: string): string => {
+    if (VALID_HEADER_RE.test(code)) return code;
+    console.warn("[ensureHeader] No valid diagram header found — prepending 'flowchart TD'");
+    return `flowchart TD\n${code}`;
+  };
+
+  /** Quick structural check before calling m.render.
+   *  Returns { ok: true } or { ok: false, reason } */
+  const validateMermaid = (code: string): { ok: boolean; reason?: string } => {
+    if (!code.trim()) return { ok: false, reason: "Empty diagram code." };
+    if (!VALID_HEADER_RE.test(code))
+      return { ok: false, reason: "No valid diagram type header found." };
+    // Detect the still-squashed "Platformdirection" pattern
+    if (/\w+direction\s+(?:TD|LR|TB|BT|RL)/i.test(code))
+      return { ok: false, reason: "Squashed 'direction' keyword detected — sanitizer did not fully clean the code." };
+    // Detect C4 token squash: a closing paren immediately followed by a C4 keyword on the same line
+    if (/\)[ \t]*(?:Person|System|Container|Component|Rel|Boundary|direction)\b/i.test(code))
+      return { ok: false, reason: "Squashed C4 statement detected — closing paren immediately followed by a keyword." };
+    return { ok: true };
+  };
+
+  // ─────────────────────────────────────────────────────────────────────────
+
   const sanitizeMermaidCode = (code: string): string => {
     // Normalize line endings
     let clean = code.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
-    // ── STEP 0: Token-level line reconstruction ──────────────────────────────
-    // Instead of trying to regex-split a squashed string, we tokenize the whole
-    // input by every known Mermaid keyword and reconstruct proper line breaks.
-    // This handles ALL squash patterns including "title Text direction TDNode("
-    // regardless of spacing or surrounding characters.
-    const TOKEN_KEYWORDS = [
-      // Diagram type declarations (no parens)
-      "%%{", "C4Context", "C4Container", "C4Component",
-      "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
-      "flowchart", "mindmap", "quadrantChart", "gantt", "timeline",
-      // Direction keyword + direction values (critical for C4 diagrams)
-      "direction TD", "direction LR", "direction TB", "direction BT", "direction RL",
-      "direction",
-      // C4 function keywords (followed by `(`)
-      "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
-      "ContainerDb_Ext", "ContainerQueue_Ext",
-      "System_Boundary", "Container_Boundary",
-      "ContainerDb", "ContainerQueue",
-      "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
-      "Container", "Component", "Boundary",
-      "Person", "System", "Rel",
-      "LAYOUT_WITH_LEGEND",
-      // Plain keywords
-      "subgraph", "classDef", "participant", "actor",
-      "title", "section",
+    // ── STEP 0: Direct keyword boundary injection ─────────────────────────────
+    // Targeted pre-pass: handle the specific crash pattern first
+    // "Xdirection TDKeyword(" — split at direction AND at any keyword following TD
+    {
+      const DIR_KW = [
+        "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
+        "ContainerDb_Ext", "ContainerQueue_Ext", "System_Boundary", "Container_Boundary",
+        "ContainerDb", "ContainerQueue", "Rel_Back", "Rel_Neighbor",
+        "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
+        "Container", "Component", "Boundary",
+        "Person", "System", "Rel",
+        "title", "subgraph", "classDef", "participant", "actor", "section",
+        "LAYOUT_WITH_LEGEND", "C4Context", "C4Container", "C4Component",
+        "flowchart", "sequenceDiagram", "erDiagram", "classDiagram",
+      ];
+      // Step A: split anything immediately before `direction <value>`
+      clean = clean.replace(/([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+      // Step B: split anything immediately after `direction <value>`
+      clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))([^\n\s])/gi, "$1\n$2");
+      // Step C: split each known keyword when it appears right after direction TD
+      for (const kw of DIR_KW) {
+        clean = clean.replace(
+          new RegExp(`(direction\\s+(?:TD|LR|TB|BT|RL))\\s*(${kw}\\b)`, "gi"),
+          "$1\n$2"
+        );
+        // Also split when a word char runs directly into this keyword with a `(`
+        clean = clean.replace(new RegExp(`(\\w)(${kw}\\s*\\()`, "g"), "$1\n$2");
+      }
+    }
+
+    const KEYWORD_PATTERNS: RegExp[] = [
+      /([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi,
+      /([^\n])(%%\{)/g,
+      /([^\n])(C4Container\b)/g,
+      /([^\n])(C4Component\b)/g,
+      /([^\n])(C4Context\b)/g,
+      /([^\n])(sequenceDiagram\b)/g,
+      /([^\n])(erDiagram\b)/g,
+      /([^\n])(classDiagram\b)/g,
+      /([^\n])(stateDiagram-v2\b)/g,
+      /([^\n])(flowchart\s)/g,
+      /([^\n])(mindmap\b)/g,
+      /([^\n])(quadrantChart\b)/g,
+      /([^\n])(gantt\b)/g,
+      /([^\n])(timeline\b)/g,
+      /([^\n])(Person_Ext\s*\()/g,
+      /([^\n])(System_Ext\s*\()/g,
+      /([^\n])(Container_Ext\s*\()/g,
+      /([^\n])(Component_Ext\s*\()/g,
+      /([^\n])(ContainerDb_Ext\s*\()/g,
+      /([^\n])(ContainerQueue_Ext\s*\()/g,
+      /([^\n])(System_Boundary\s*\()/g,
+      /([^\n])(Container_Boundary\s*\()/g,
+      /([^\n])(ContainerDb\s*\()/g,
+      /([^\n])(ContainerQueue\s*\()/g,
+      /([^\n])(Rel_Back\s*\()/g,
+      /([^\n])(Rel_Neighbor\s*\()/g,
+      /([^\n])(Rel_Up\s*\()/g,
+      /([^\n])(Rel_Down\s*\()/g,
+      /([^\n])(Rel_Left\s*\()/g,
+      /([^\n])(Rel_Right\s*\()/g,
+      /([^\n])(Container\s*\()/g,
+      /([^\n])(Component\s*\()/g,
+      /([^\n])(Boundary\s*\()/g,
+      /([^\n])(Person\s*\()/g,
+      /([^\n])(System\s*\()/g,
+      /([^\n])(Rel\s*\()/g,
+      /([^\n])(LAYOUT_WITH_LEGEND)/g,
+      /([^\n])(subgraph\s)/g,
+      /([^\n])(classDef\s)/g,
+      /([^\n])(participant\s)/g,
+      /([^\n])(actor\s)/g,
+      /([^\n])(title\s)/g,
+      /([^\n])(section\s)/g,
     ];
 
-    // Build a regex that matches any keyword at a non-newline boundary
-    // We insert a newline BEFORE any keyword that appears after a non-newline char
-    // Process keywords longest-first to avoid partial matches
-    const sortedKeywords = [...TOKEN_KEYWORDS].sort((a, b) => b.length - a.length);
-
-    // Process line-by-line so we preserve existing correct line breaks
-    const reconstructed = clean.split("\n").flatMap((line) => {
-      // Skip comment/init lines and empty lines
-      if (!line.trim() || line.trim().startsWith("%%")) return [line];
-
-      let result = line;
-      // For each keyword, if it appears anywhere in the line NOT at position 0
-      // (meaning it's squashed after something), inject a newline before it.
-      // We do this iteratively until stable.
-      for (let pass = 0; pass < 10; pass++) {
-        let changed = false;
-        for (const kw of sortedKeywords) {
-          // Skip graph — too short and causes false positives in labels
-          if (kw === "graph") continue;
-          const idx = result.indexOf(kw);
-          // Only split if keyword exists AND is NOT at the start of a line
-          // (idx === 0 means at string start, result[idx-1] === '\n' means at line start)
-          if (idx >= 0) {
-            const isAtLineStart = idx === 0 || result[idx - 1] === '\n';
-            if (!isAtLineStart) {
-              // Only split if the char before is NOT a newline and the keyword is
-              // not inside a quoted string
-              const before = result.slice(0, idx);
-              const after = result.slice(idx);
-              // Check we're not inside quotes by counting unescaped quotes before idx
-              const quoteCount = (before.match(/"/g) || []).length;
-              if (quoteCount % 2 === 0) {
-                result = before.trimEnd() + "\n" + after;
-                changed = true;
-                break; // restart the keyword scan on the new first segment
-              }
-            }
-          }
-        }
-        if (!changed) break;
+    for (let pass = 0; pass < 30; pass++) {
+      const prev = clean;
+      for (const pattern of KEYWORD_PATTERNS) {
+        clean = clean.replace(pattern, "$1\n$2");
       }
-      // Split the result on any injected newlines and return multiple lines
-      return result.split("\n");
-    });
+      if (clean === prev) break;
+    }
 
-    clean = reconstructed.join("\n");
+    // Ensure `direction TD/LR/...` is isolated on its own line
+    clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n])/gi, "$1\n$2");
+
     // ── END STEP 0 ───────────────────────────────────────────────────────────
 
-    // ── Category 1: Diagram-type declarations ────────────────────────────────
-    // These are standalone keywords with NO parentheses that may be squashed
-    // directly against another word character (e.g. "C4Contexttitle").
-    // MUST NOT use \b because the preceding character is also a word char.
-    const DIAGRAM_DECLARATIONS = [
-      "C4Context", "C4Container", "C4Component",
-      "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
-      "flowchart", "mindmap", "quadrantChart", "gantt", "timeline", "graph"
-    ];
-
-    // ── Category 2: C4 function keywords (always followed by `(`) ────────────
-    // These can appear after any character, including another word char.
-    const C4_FUNC_KEYWORDS = [
-      "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
-      "ContainerDb_Ext", "ContainerQueue_Ext",
-      "System_Boundary", "Container_Boundary",
-      "ContainerDb", "ContainerQueue",
-      "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
-      "Container", "Component", "Boundary",
-      "Person", "System", "Rel"
-    ];
-
-    // ── Category 3: Plain Mermaid keywords ───────────────────────────────────
-    // These are preceded by whitespace in valid code but may be squashed after
-    // punctuation/symbols. Matched without requiring \b (which fails
-    // word-char → word-char boundaries like "Platformtitle").
-    const PLAIN_KEYWORDS = [
-      "direction",
-      "classDef", "class",
-      "participant", "actor", "autonumber", "loop", "rect", "opt", "alt", "else",
-      "state", "dateFormat", "axisFormat", "section",
-      "x-axis", "y-axis", "quadrant-1", "quadrant-2", "quadrant-3", "quadrant-4",
-      "title", "end"
-    ];
-
-    // ── Category 4: Structural block keywords ─────────────────────────────────
-    // subgraph and end MUST always start on a fresh line regardless of what
-    // character precedes them. Critically, they can appear directly after a
-    // direction word-char (e.g. "TDsubgraph") so we CANNOT use the
-    // (?<![\w]) lookbehind used in Category 3 — it would block the match.
-    // Instead use the same unconditional ([^\n])(keyword) pattern as Cat 1.
-    const STRUCTURAL_KEYWORDS = ["subgraph"];
-
-    /**
-     * One full sweep: split all squashed statements by inserting \n before each
-     * recognized keyword. Runs on unquoted segments only to preserve labels.
-     * Called in a do-while loop until idempotent.
-     */
-    const applySplitPass = (input: string): string => {
-      let segments = input.split('"');
-      if (segments.length % 2 === 0) {
-        segments = [input];
-      }
-
-      for (let i = 0; i < segments.length; i += 2) {
-        let seg = segments[i];
-
-        // ── Structural block keywords first (subgraph before graph) ──
-        for (const kw of STRUCTURAL_KEYWORDS) {
-          const regex = new RegExp(`([^\\n])(${kw}(?:\\s|$))`, "g");
-          seg = seg.replace(regex, "$1\n$2");
-        }
-
-        // ── Diagram declarations ──
-        for (const kw of DIAGRAM_DECLARATIONS) {
-          const pattern = kw === "graph" ? "(?<!sub)graph" : kw;
-          const regex = new RegExp(`([^\\n])(${pattern})`, "g");
-          seg = seg.replace(regex, "$1\n$2");
-          const trailingRegex = new RegExp(`(${pattern})([a-zA-Z])`, "g");
-          seg = seg.replace(trailingRegex, "$1\n$2");
-        }
-
-        // ── C4 function calls ──
-        for (const kw of C4_FUNC_KEYWORDS) {
-          const regex = new RegExp(`([^\\n_])\\s*(${kw}\\s*\\()`, "g");
-          seg = seg.replace(regex, "$1\n$2");
-        }
-
-        // ── Direction keyword — ALL boundary character types ──
-        // Pass 1: word-char before direction
-        seg = seg.replace(/(\w)(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
-        // Pass 2: closing paren/bracket before direction  ← KEY FIX
-        seg = seg.replace(/([)\]}>])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
-        // Pass 3: any other non-newline char before direction
-        seg = seg.replace(/([^\n\w)\]}>])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
-        // Pass 4: word-char directly after direction value
-        seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))(\w)/gi, "$1\n$2");
-        // Pass 5: opening paren/bracket after direction value  ← KEY FIX
-        seg = seg.replace(/(direction\s+(?:TD|LR|TB|BT|RL))([([{<_])/gi, "$1\n$2");
-        // Pass 6: no-space directionTD → direction TD
-        seg = seg.replace(/(direction)(TD|LR|TB|BT|RL)/gi, "$1 $2");
-        // Pass 7: underscore directly after the direction value (TD_System → TD\n_System)
-        seg = seg.replace(/((?:TD|LR|TB|BT|RL))(_)/gi, "$1\n$2");
-
-        // ── Plain keywords ──
-        for (const kw of PLAIN_KEYWORDS) {
-          const escaped = kw.replace(/[-]/g, "\\-");
-          const wordBeforeRegex = new RegExp(`(\\w)(${escaped}(?:\\s+|:|(?=\\s*$)))`, "g");
-          seg = seg.replace(wordBeforeRegex, "$1\n$2");
-          const nonWordRegex = new RegExp(`([^\\n])((?<![\\w])${escaped}(?:\\s+|:|(?=\\s*$)))`, "g");
-          seg = seg.replace(nonWordRegex, "$1\n$2");
-        }
-
-        segments[i] = seg;
-      }
-      return segments.join('"');
-    };
-
-    // Multi-pass: repeat until idempotent (no further changes), max 20 passes
-    let prev: string;
-    let iterations = 0;
-    do {
-      prev = clean;
-      clean = applySplitPass(clean);
-      iterations++;
-    } while (clean !== prev && iterations < 20);
-
-    // ── Final safety-net passes (applied AFTER the multi-pass loop) ─────────
-    // These target specific squash patterns that survive unquoted-segment
-    // processing: flowchart/graph declarations merged with the next statement.
-
-    // 0. direction keyword squashed with surrounding word characters — full-string
-    //    safety net that catches any case the per-segment loop may have missed
-    //    (e.g. inside an odd-split quoted segment, or zero-space directionTD).
+    // ── Legacy segment-aware passes (belt-and-suspenders) ────────────────────
     const DIR = "(?:TD|LR|TB|BT|RL)";
-    // No-space directionTD → direction TD
     clean = clean.replace(new RegExp(`(direction)(${DIR})`, "gi"), "$1 $2");
-    // Word-char before direction
     clean = clean.replace(new RegExp(`(\\w)(direction\\s+${DIR})`, "gi"), "$1\n$2");
-    // Closing bracket/paren before direction  ← NEW
     clean = clean.replace(new RegExp(`([)\\]}>])(direction\\s+${DIR})`, "gi"), "$1\n$2");
-    // Word-char after direction value
     clean = clean.replace(new RegExp(`(direction\\s+${DIR})(\\w)`, "gi"), "$1\n$2");
-    // Opening bracket/paren after direction value  ← NEW
     clean = clean.replace(new RegExp(`(direction\\s+${DIR})([([{<_])`, "gi"), "$1\n$2");
-    // Handle underscore directly after the direction value (TD_System → TD\n_System)
     clean = clean.replace(new RegExp(`(${DIR})(_)`, "gi"), "$1\n$2");
-    // Handle title followed by direction — use greedy [^\n]+ to consume all text
-    // before `direction` rather than stopping too early with a lazy quantifier
     clean = clean.replace(new RegExp(`(title\\s+[^\\n]+)(direction)`, "gi"), "$1\n$2");
-
-    // 1. flowchart/graph + direction squashed against subgraph / end / another graph keyword.
-    //    IMPORTANT: use explicit direction alternation instead of \w+ so "TD" doesn't
-    //    get swallowed together with the following keyword into one token.
     clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(subgraph)`, "gi"), "$1\n$2");
     clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(graph)`, "gi"), "$1\n$2");
     clean = clean.replace(new RegExp(`(graph\\s+${DIR})(subgraph)`, "gi"), "$1\n$2");
-    clean = clean.replace(new RegExp(`(graph\\s+${DIR})(graph)`, "gi"), "$1\n$2");
-
-    // 2. Any remaining keyword-to-keyword merges that survived the loop
     clean = clean.replace(/(subgraph\s+\S+)(subgraph)/gi, "$1\n$2");
     clean = clean.replace(/(\bend\b)(subgraph)/gi, "$1\n$2");
-    clean = clean.replace(/(\bend\b)(flowchart)/gi, "$1\n$2");
-    clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(end\\b)`, "gi"), "$1\n$2");
-
-    // LAYOUT_WITH_LEGEND always on its own line
     clean = clean.replace(/\s*LAYOUT_WITH_LEGEND(\(\))?\s*/gi, "\nLAYOUT_WITH_LEGEND()\n");
-
-    // ── DEFENSIVE REPARSING PASSES ──────────────────────────────────────────
-    // Ensure newline after graph/flowchart direction line
-    clean = clean.replace(/((?:graph|flowchart)\s+(?:TD|LR|RL|BT|TB))\s*(?!\n)/g, '$1\n');
-    // Ensure newline after subgraph declarations
-    clean = clean.replace(/(subgraph\s+[^\n]+)\s*(?!\n)/g, '$1\n');
-    // ── NUCLEAR DIRECTION PASS: anything before OR after `direction TD/LR/...`
-    // that is not a newline gets split off — greedy, applied after all other passes
-    clean = clean.replace(/([^\n]+?)\s*(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n]+)/gi, (_, before, dir, after) => {
-      const parts: string[] = [];
-      if (before.trim()) parts.push(before.trim());
-      parts.push(dir.trim());
-      if (after.trim()) parts.push(after.trim());
-      return parts.join("\n");
-    });
+    clean = clean.replace(/((?:graph|flowchart)\s+(?:TD|LR|RL|BT|TB))\s*(?!\n)/g, "$1\n");
+    clean = clean.replace(/(subgraph\s+[^\n]+)\s*(?!\n)/g, "$1\n");
 
     // Wrap bare node labels containing spaces/special chars in quotes
-    // e.g. A(My Service) -> A("My Service")
     clean = clean.replace(
       /(\w[\w-]*)\(([^")(]+)\)/g,
       (match, id, label) =>
-        label.includes(' ') || /[^a-zA-Z0-9]/.test(label)
-          ? `${id}("${label}")`
+        label.includes(" ") || /[^a-zA-Z0-9]/.test(label)
+          ? `${id}("${escapeLabel(label)}")`
           : match
     );
-    // e.g. A[My Service] -> A["My Service"]
     clean = clean.replace(
       /(\w[\w-]*)\[([^"\]]+)\]/g,
       (match, id, label) =>
-        label.includes(' ') || /[^a-zA-Z0-9]/.test(label)
-          ? `${id}["${label}"]`
+        label.includes(" ") || /[^a-zA-Z0-9]/.test(label)
+          ? `${id}["${escapeLabel(label)}"]`
           : match
     );
-    // ────────────────────────────────────────────────────────────────────────
+
+    // Ensure a valid header exists
+    clean = ensureHeader(clean);
 
     // Collapse excessive blank lines
     clean = clean.replace(/\n{3,}/g, "\n\n");
@@ -1578,6 +1485,12 @@ export default function Home() {
   }
 
   const validateMermaidStatements = (code: string): ValidationResult => {
+    // Fast structural pre-check using validateMermaid
+    const structural = validateMermaid(code);
+    if (!structural.ok) {
+      return { isValid: false, errorMsg: structural.reason };
+    }
+
     const lines = code.split("\n");
     const keywords = [
       "C4Context", "C4Container", "C4Component", "direction",
@@ -1605,7 +1518,6 @@ export default function Home() {
         } else {
           regex = new RegExp(`\\b${kw}\\b`, "i");
         }
-
         if (regex.test(outsideQuotes)) {
           statementCount++;
           matchedKeywords.push(kw);
@@ -1617,7 +1529,7 @@ export default function Home() {
           isValid: false,
           lineNum: i + 1,
           lineContent: lines[i],
-          errorMsg: `Validation failed: Line ${i + 1} contains multiple squashed statements: "${lines[i]}" (detected keywords: ${matchedKeywords.join(", ")})`
+          errorMsg: `Line ${i + 1} has squashed statements: "${lines[i]}" (keywords: ${matchedKeywords.join(", ")})`
         };
       }
     }
@@ -1630,182 +1542,101 @@ export default function Home() {
       setCanvasError("Mermaid.js CDN library is not loaded onto browser.");
       return null;
     }
-    const cleanCode = sanitizeMermaidCode(code);
 
-    const sanitizeMermaid = (c: string): string => {
-      const DIR_ALT = "(?:TD|LR|TB|BT|RL)";
-      let s = c.replace(/\r\n/g, "\n");
+    // ── Stage 1: primary sanitize ─────────────────────────────────────────
+    let cleanCode = sanitizeMermaidCode(code);
 
-      // ── Token-based line reconstruction (same logic as sanitizeMermaidCode) ──
-      const INNER_KEYWORDS = [
-        "C4Context", "C4Container", "C4Component",
-        "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
-        "flowchart", "mindmap", "quadrantChart", "gantt", "timeline",
-        "direction TD", "direction LR", "direction TB", "direction BT", "direction RL",
-        "direction",
+    // ── Stage 2: secondary inline pass (same patterns, belt-and-suspenders) ─
+    // NOTE: Regex literals with /g flag maintain lastIndex state across reuse.
+    // We rebuild them each call via factory functions to avoid stale lastIndex.
+    const makePatterns = (): RegExp[] => [
+      /([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi,
+      /([^\n])(%%\{)/g,
+      /([^\n])(C4Container\b)/g, /([^\n])(C4Component\b)/g, /([^\n])(C4Context\b)/g,
+      /([^\n])(sequenceDiagram\b)/g, /([^\n])(erDiagram\b)/g,
+      /([^\n])(classDiagram\b)/g, /([^\n])(stateDiagram-v2\b)/g,
+      /([^\n])(flowchart\s)/g, /([^\n])(mindmap\b)/g,
+      /([^\n])(quadrantChart\b)/g, /([^\n])(gantt\b)/g, /([^\n])(timeline\b)/g,
+      /([^\n])(Person_Ext\s*\()/g, /([^\n])(System_Ext\s*\()/g,
+      /([^\n])(Container_Ext\s*\()/g, /([^\n])(Component_Ext\s*\()/g,
+      /([^\n])(ContainerDb_Ext\s*\()/g, /([^\n])(ContainerQueue_Ext\s*\()/g,
+      /([^\n])(System_Boundary\s*\()/g, /([^\n])(Container_Boundary\s*\()/g,
+      /([^\n])(ContainerDb\s*\()/g, /([^\n])(ContainerQueue\s*\()/g,
+      /([^\n])(Rel_Back\s*\()/g, /([^\n])(Rel_Neighbor\s*\()/g,
+      /([^\n])(Rel_Up\s*\()/g, /([^\n])(Rel_Down\s*\()/g,
+      /([^\n])(Rel_Left\s*\()/g, /([^\n])(Rel_Right\s*\()/g,
+      /([^\n])(Container\s*\()/g, /([^\n])(Component\s*\()/g,
+      /([^\n])(Boundary\s*\()/g,
+      /([^\n])(Person\s*\()/g, /([^\n])(System\s*\()/g, /([^\n])(Rel\s*\()/g,
+      /([^\n])(LAYOUT_WITH_LEGEND)/g,
+      /([^\n])(subgraph\s)/g, /([^\n])(classDef\s)/g,
+      /([^\n])(participant\s)/g, /([^\n])(actor\s)/g,
+      /([^\n])(title\s)/g, /([^\n])(section\s)/g,
+    ];
+
+    const applyPatterns = (input: string): string => {
+      let s = input;
+
+      // ── Targeted pre-pass: handle the specific recurring crash pattern ──────
+      s = s.replace(/([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi, (m, a, b) => a + "\n" + b);
+      s = s.replace(/(direction\s+(?:TD|LR|TB|BT|RL))([^\n\s])/gi, (m, a, b) => a + "\n" + b);
+      const DIR_KEYWORDS = [
         "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
-        "ContainerDb_Ext", "ContainerQueue_Ext",
-        "System_Boundary", "Container_Boundary",
-        "ContainerDb", "ContainerQueue",
-        "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
-        "Container", "Component", "Boundary",
-        "Person", "System", "Rel",
-        "LAYOUT_WITH_LEGEND", "subgraph", "classDef", "participant", "actor",
-        "title", "section",
-      ].sort((a, b) => b.length - a.length);
+        "ContainerDb_Ext", "ContainerQueue_Ext", "System_Boundary", "Container_Boundary",
+        "ContainerDb", "ContainerQueue", "Rel_Back", "Rel_Neighbor", "Rel_Up",
+        "Rel_Down", "Rel_Left", "Rel_Right", "Container", "Component", "Boundary",
+        "Person", "System", "Rel", "title", "subgraph", "classDef", "participant",
+        "actor", "section", "LAYOUT_WITH_LEGEND",
+        "C4Context", "C4Container", "C4Component",
+        "flowchart", "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram",
+      ];
+      for (const kw of DIR_KEYWORDS) {
+        s = s.replace(new RegExp(`(direction\\s+(?:TD|LR|TB|BT|RL))\\s*(${kw}\\b)`, "gi"), (m, a, b) => a + "\n" + b);
+        s = s.replace(new RegExp(`(\\w)(${kw}\\s*\\()`, "g"), (m, a, b) => a + "\n" + b);
+      }
 
-      const lines2 = s.split("\n").flatMap((line) => {
-        if (!line.trim() || line.trim().startsWith("%%")) return [line];
-        let result = line;
-        for (let pass = 0; pass < 10; pass++) {
-          let changed = false;
-          for (const kw of INNER_KEYWORDS) {
-            const idx = result.indexOf(kw);
-            // Only split if keyword exists AND is NOT at the start of a line
-            if (idx >= 0) {
-              const isAtLineStart = idx === 0 || result[idx - 1] === '\n';
-              if (!isAtLineStart) {
-                const before = result.slice(0, idx);
-                const after = result.slice(idx);
-                const quoteCount = (before.match(/"/g) || []).length;
-                if (quoteCount % 2 === 0) {
-                  result = before.trimEnd() + "\n" + after;
-                  changed = true;
-                  break;
-                }
-              }
-            }
-          }
-          if (!changed) break;
-        }
-        return result.split("\n");
-      });
-      s = lines2.join("\n");
-
-      // flowchart/graph declaration squashed against subgraph or next graph keyword
-      s = s.replace(new RegExp(`(flowchart\\s+${DIR_ALT})(subgraph)`, "gi"), "$1\n$2");
-      s = s.replace(new RegExp(`(flowchart\\s+${DIR_ALT})(graph)`, "gi"), "$1\n$2");
-      s = s.replace(new RegExp(`(graph\\s+${DIR_ALT})(subgraph)`, "gi"), "$1\n$2");
-
-      // direction with no-space value → add space, then split adjacent content
-      s = s.replace(new RegExp(`(direction)(${DIR_ALT})`, "gi"), "$1 $2");
-      s = s.replace(new RegExp(`(direction\\s+${DIR_ALT})(\\w)`, "gi"), "$1\n$2");
-      s = s.replace(new RegExp(`(direction\\s+${DIR_ALT})([([{<_])`, "gi"), "$1\n$2");
-
-      // end keyword always on its own line
-      s = s.replace(/([^\n])\b(end)\b(\s*\n)/gi, "$1\nend\n");
-
-      // collapse excessive blank lines
+      // ── General pattern loop — fresh regex instances each pass ──────────────
+      for (let pass = 0; pass < 30; pass++) {
+        const prev = s;
+        const patterns = makePatterns(); // fresh instances avoid stale lastIndex
+        for (const p of patterns) s = s.replace(p, (m, a, b) => a + "\n" + b);
+        if (s === prev) break;
+      }
+      s = s.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n])/gi, (m, a, b) => a + "\n" + b);
+      s = s.replace(/([^\n])\b(end)\b(\s*\n)/gi, (m, a, b, c) => a + "\nend\n");
       s = s.replace(/\n{3,}/g, "\n\n");
-      return s.trim();
+      return ensureHeader(s.trim());
     };
 
-    const finalCode = sanitizeMermaid(cleanCode);
+    const finalCode = applyPatterns(cleanCode);
 
-    if (finalCode !== code) {
-      setMermaidCode(finalCode);
-    }
+    if (finalCode !== code) setMermaidCode(finalCode);
 
-    // Pre-rendering statement validation
+    // ── Stage 3: structural validation — re-sanitize if squash still detected ─
     const validation = validateMermaidStatements(finalCode);
     if (!validation.isValid) {
-      console.warn("Validation failed for Mermaid source code:", validation.errorMsg);
-      setCanvasError(validation.errorMsg || "Syntax validation failed.");
-      return null;
+      console.warn("[validateMermaidStatements] Squash detected, applying extra sanitize pass:", validation.errorMsg);
     }
+    // Always run applyPatterns one more time — idempotent if already clean
+    const guardedCode = applyPatterns(applyPatterns(finalCode));
 
     const m = (window as any).mermaid;
     const renderId = "mermaid-render-" + Math.random().toString(36).substring(2, 9);
 
-    // Emergency line-by-line guard using token-based splitting — same approach
-    // as sanitizeMermaidCode's STEP 0 but applied to finalCode as a last resort
-    const EMERGENCY_KEYWORDS = [
-      "C4Context", "C4Container", "C4Component",
-      "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram-v2",
-      "flowchart", "mindmap", "quadrantChart", "gantt", "timeline",
-      "direction TD", "direction LR", "direction TB", "direction BT", "direction RL",
-      "direction",
-      "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
-      "ContainerDb_Ext", "ContainerQueue_Ext",
-      "System_Boundary", "Container_Boundary",
-      "ContainerDb", "ContainerQueue",
-      "Rel_Back", "Rel_Neighbor", "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
-      "Container", "Component", "Boundary",
-      "Person", "System", "Rel",
-      "LAYOUT_WITH_LEGEND", "subgraph", "classDef", "participant", "actor",
-      "title", "section",
-    ].sort((a, b) => b.length - a.length);
-
-    const emergencyLines = finalCode.split("\n").flatMap((line) => {
-      if (!line.trim() || line.trim().startsWith("%%")) return [line];
-      let result = line;
-      for (let pass = 0; pass < 10; pass++) {
-        let changed = false;
-        for (const kw of EMERGENCY_KEYWORDS) {
-          const idx = result.indexOf(kw);
-          // Only split if keyword exists AND is NOT at the start of a line
-          if (idx >= 0) {
-            const isAtLineStart = idx === 0 || result[idx - 1] === '\n';
-            if (!isAtLineStart) {
-              const before = result.slice(0, idx);
-              const after = result.slice(idx);
-              const quoteCount = (before.match(/"/g) || []).length;
-              if (quoteCount % 2 === 0) {
-                result = before.trimEnd() + "\n" + after;
-                changed = true;
-                break;
-              }
-            }
-          }
-        }
-        if (!changed) break;
-      }
-      return result.split("\n");
-    });
-    const guardedCode = emergencyLines.join("\n");
     try {
       const { svg } = await m.render(renderId, guardedCode);
       setCanvasSvg(svg);
       setCanvasError(null);
-      // Auto centers the dynamic diagram view
-      setTimeout(() => {
-        autoFitDiagramView();
-      }, 50);
+      setTimeout(() => { autoFitDiagramView(); }, 50);
       return svg;
     } catch (e: any) {
-      console.error("Client side parsing failed:", e);
+      console.error("[renderMermaidMarkup] m.render failed.\nCode passed to renderer:\n" + guardedCode + "\nError:", e);
 
-      // ── Nuclear auto-repair: token-based line reconstruction ─────────────
-      if (e.message && /lexical error|parse error|unrecognized text/i.test(e.message)) {
+      // ── Auto-repair: extra applyPatterns pass ─────────────────────────────
+      if (e.message && /lexical error|parse error|unrecognized text|No diagram type/i.test(e.message)) {
+        const repairedCode = applyPatterns(guardedCode);
+        console.warn("[renderMermaidMarkup] Attempting repair. Repaired code:\n" + repairedCode);
         try {
-          const repairedLines = guardedCode.split("\n").flatMap((line) => {
-            if (!line.trim() || line.trim().startsWith("%%")) return [line];
-            let result = line;
-            for (let pass = 0; pass < 10; pass++) {
-              let changed = false;
-              for (const kw of EMERGENCY_KEYWORDS) {
-                const idx = result.indexOf(kw);
-                // Only split if keyword exists AND is NOT at the start of a line
-                if (idx >= 0) {
-                  const isAtLineStart = idx === 0 || result[idx - 1] === '\n';
-                  if (!isAtLineStart) {
-                    const before = result.slice(0, idx);
-                    const after = result.slice(idx);
-                    const quoteCount = (before.match(/"/g) || []).length;
-                    if (quoteCount % 2 === 0) {
-                      result = before.trimEnd() + "\n" + after;
-                      changed = true;
-                      break;
-                    }
-                  }
-                }
-              }
-              if (!changed) break;
-            }
-            return result.split("\n");
-          });
-
-          const repairedCode = repairedLines.join("\n");
           const repairRenderId = "mermaid-render-repair-" + Math.random().toString(36).substring(2, 9);
           const { svg } = await m.render(repairRenderId, repairedCode);
           setMermaidCode(repairedCode);
@@ -1813,14 +1644,20 @@ export default function Home() {
           setCanvasError(null);
           setTimeout(() => { autoFitDiagramView(); }, 50);
           return svg;
-        } catch (repairErr) {
-          console.error("Auto-repair attempt also failed:", repairErr);
+        } catch (repairErr: any) {
+          console.error("[renderMermaidMarkup] Repair also failed:", repairErr);
+          setCanvasError(
+            `Diagram rendering failed.\n\nError: ${repairErr.message || repairErr}\n\nGenerated code (first 500 chars):\n${repairedCode.slice(0, 500)}`
+          );
+          const badElem = document.getElementById(renderId);
+          if (badElem) badElem.remove();
+          return null;
         }
       }
-      // ─────────────────────────────────────────────────────────────────────
 
-      setCanvasError(e.message || "The compile engine failed to parse visual code styles.");
-      // Clean up bad renderer states
+      setCanvasError(
+        `Diagram rendering failed.\n\nError: ${e.message || e}\n\nGenerated code (first 500 chars):\n${guardedCode.slice(0, 500)}`
+      );
       const badElem = document.getElementById(renderId);
       if (badElem) badElem.remove();
       return null;
@@ -2021,8 +1858,9 @@ export default function Home() {
           body: JSON.stringify({ stage: 3, blueprint: lastBlueprint })
         });
         if (!res.ok) {
-          const errJson = await res.json();
-          throw new Error(errJson.error || "Retry compilation failed.");
+          let errMsg = "Retry compilation failed.";
+          try { const j = await res.json(); errMsg = j.error || errMsg; } catch { errMsg = `Server error ${res.status}`; }
+          throw new Error(errMsg);
         }
         const { xml } = await res.json();
         setDrawioXML(xml);
@@ -2409,7 +2247,12 @@ export default function Home() {
         }),
       });
 
-      const data = await res.json();
+      let data: any = {};
+      try {
+        data = await res.json();
+      } catch {
+        data = { error: `Server error ${res.status}` };
+      }
 
       if (!res.ok) {
         throw new Error(data.error || "GitHub push failed");
@@ -2456,6 +2299,10 @@ export default function Home() {
         src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"
         strategy="afterInteractive"
         onLoad={handleMermaidLoad}
+        onError={() => {
+          console.warn("[Mermaid] CDN script failed to load. Diagrams will not render until the library is available.");
+          setCanvasError("Mermaid.js failed to load from CDN. Check your internet connection and reload the page.");
+        }}
       />
 
       {/* ── REPO SYSTEM: Phase 3 ── */}
