@@ -246,6 +246,8 @@ export default function Home() {
   const [drawioStatus, setDrawioStatus] = useState<"empty" | "loading" | "loaded" | "error">("empty");
   const [drawioError, setDrawioError] = useState<string | null>(null);
   const [drawioXML, setDrawioXML] = useState<string | null>(null);
+  // Keep drawioXmlRef in sync — used by the init event handler to avoid stale closure
+  useEffect(() => { drawioXmlRef.current = drawioXML; }, [drawioXML]);
   const [drawioFormatOpen, setDrawioFormatOpen] = useState(false);
 
   // GitHub Export State
@@ -333,6 +335,9 @@ export default function Home() {
   // References
   const containerRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  // Ref mirror of drawioXML so the draw.io `init` event handler always reads
+  // the latest XML — the state-based closure would be stale at init time.
+  const drawioXmlRef = useRef<string | null>(null);
 
   // ----------------------------------------------------
   // ROBUST PURE CALLBACK UTILITIES
@@ -525,6 +530,21 @@ export default function Home() {
   }, [logoAssignTarget, resolvedLogos]);
   // ── END LOGO SYSTEM: auto-open popover on target change ──────────────────
 
+  // ── Safety net: when iframe becomes ready AFTER XML was already set ───────
+  // Handles the case where loadDrawioXml ran while drawioReady was still false
+  // (iframe not yet initialized), so the postMessage was skipped. Once the
+  // iframe fires `init` and drawioReady flips to true, this effect re-sends.
+  // The init handler also covers this, but the double-cover is harmless.
+  useEffect(() => {
+    if (drawioReady && drawioXmlRef.current) {
+      iframeRef.current?.contentWindow?.postMessage(
+        JSON.stringify({ action: "load", xml: drawioXmlRef.current, autosave: 1 }),
+        "*"
+      );
+    }
+  }, [drawioReady]);
+  // ── END safety net ────────────────────────────────────────────────────────
+
   useEffect(() => {
     // Set up message listener for draw.io iframe postMessages
     const handleDrawioMessage = (evt: MessageEvent) => {
@@ -537,10 +557,13 @@ export default function Home() {
           case "init":
             setDrawioReady(true);
             setDrawioStatus("loaded");
-            // If we have an XML diagram queued up, load it in!
-            if (drawioXML) {
+            // Use the ref (not the state closure) to read the latest XML.
+            // The state closure captured here is stale — setDrawioXML() may have
+            // been called after this effect registered, so drawioXML in closure
+            // is null even though the ref already has the fresh value.
+            if (drawioXmlRef.current) {
               iframeRef.current?.contentWindow?.postMessage(
-                JSON.stringify({ action: "load", xml: drawioXML, autosave: 1 }),
+                JSON.stringify({ action: "load", xml: drawioXmlRef.current, autosave: 1 }),
                 "*"
               );
             }
@@ -742,6 +765,32 @@ export default function Home() {
     setDrawioError(null);
     setDrawioStatus("loading");
 
+    // Diagram kinds where compileBlueprintToDrawio produces empty/wrong output
+    // because they don't use the groups/nodes/edges structure.
+    // For these, compileSvgToDrawioXml (SVG-embed) is always the right path.
+    const NON_FLOWCHART_KINDS = new Set([
+      "er", "sequence", "class", "state",
+      "gantt", "timeline", "mindmap", "quadrant",
+      "c4context", "c4container", "c4component",
+    ]);
+    const diagramKind = (targetBlueprint?.diagramKind || "flowchart").toLowerCase();
+    const needsSvgEmbed = NON_FLOWCHART_KINDS.has(diagramKind);
+
+    // Helper: load an XML string into the draw.io iframe and update state.
+    // Also writes to drawioXmlRef immediately so the iframe `init` event handler
+    // can read the latest value even before React state has re-rendered.
+    const loadDrawioXml = (xml: string) => {
+      drawioXmlRef.current = xml;   // sync ref first — read by init handler
+      setDrawioXML(xml);
+      setDrawioStatus("loaded");
+      if (drawioReady) {
+        iframeRef.current?.contentWindow?.postMessage(
+          JSON.stringify({ action: "load", xml, autosave: 1 }),
+          "*"
+        );
+      }
+    };
+
     try {
       // --------------------------------------------------
       // STAGE 2: PARALLEL MERMAID COMPILATION
@@ -773,122 +822,129 @@ export default function Home() {
       let drawioDataXML: string | null = null;
 
       if (compilerMethod === "visual") {
+        // Visual: always embed the rendered SVG, works for every diagram type
         if (renderedSvg) {
           try {
             const xml = compileSvgToDrawioXml(renderedSvg);
             drawioDataXML = xml;
-            setDrawioXML(xml);
-            setDrawioStatus("loaded");
-            if (drawioReady) {
-              iframeRef.current?.contentWindow?.postMessage(
-                JSON.stringify({ action: "load", xml, autosave: 1 }),
-                "*"
-              );
-            }
+            loadDrawioXml(xml);
           } catch (localErr: any) {
-            console.error("Visual compilation to drawio failed, falling back to deterministic...", localErr);
+            console.error("Visual SVG compilation to drawio failed, falling back to deterministic...", localErr);
             try {
               const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
               drawioDataXML = xml;
-              setDrawioXML(xml);
-              setDrawioStatus("loaded");
-              if (drawioReady) {
-                iframeRef.current?.contentWindow?.postMessage(
-                  JSON.stringify({ action: "load", xml, autosave: 1 }),
-                  "*"
-                );
-              }
+              loadDrawioXml(xml);
             } catch (fallbackErr: any) {
               setDrawioStatus("error");
               setDrawioError(fallbackErr.message || "Failed to compile visual diagram.");
             }
           }
         } else {
-          try {
-            const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
-            drawioDataXML = xml;
-            setDrawioXML(xml);
-            setDrawioStatus("loaded");
-            if (drawioReady) {
-              iframeRef.current?.contentWindow?.postMessage(
-                JSON.stringify({ action: "load", xml, autosave: 1 }),
-                "*"
-              );
+          // No SVG rendered — fall back to deterministic for flowcharts, error for others
+          if (!needsSvgEmbed) {
+            try {
+              const xml = compileBlueprintToDrawio(targetBlueprint, canvasSvg || undefined, resolvedLogos);
+              drawioDataXML = xml;
+              loadDrawioXml(xml);
+            } catch (fallbackErr: any) {
+              setDrawioStatus("error");
+              setDrawioError("No SVG rendered and deterministic fallback failed.");
             }
-          } catch (fallbackErr: any) {
+          } else {
             setDrawioStatus("error");
-            setDrawioError("No SVG was rendered and deterministic fallback failed.");
+            setDrawioError("Diagram could not be rendered. Please try again.");
           }
         }
       } else if (compilerMethod === "deterministic") {
-        try {
-          const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
-          drawioDataXML = xml;
-          setDrawioXML(xml);
-          setDrawioStatus("loaded");
-
-          if (drawioReady) {
-            iframeRef.current?.contentWindow?.postMessage(
-              JSON.stringify({ action: "load", xml, autosave: 1 }),
-              "*"
-            );
+        if (needsSvgEmbed) {
+          // Non-flowchart types: compileBlueprintToDrawio can't handle them.
+          // Use the rendered SVG as an embedded image — same as "visual" mode.
+          if (renderedSvg) {
+            try {
+              const xml = compileSvgToDrawioXml(renderedSvg);
+              drawioDataXML = xml;
+              loadDrawioXml(xml);
+            } catch (svgErr: any) {
+              setDrawioStatus("error");
+              setDrawioError(svgErr.message || "Failed to embed diagram into draw.io.");
+            }
+          } else {
+            setDrawioStatus("error");
+            setDrawioError("Diagram could not be rendered. Please try again.");
           }
-        } catch (localErr: any) {
-          console.error("Local geometric compilation failed, falling back to server...", localErr);
-          setDrawioStatus("loading");
-          const fallbackRes = await fetch("/api/generate", {
+        } else {
+          // Flowchart: use the deterministic geometric compiler
+          try {
+            const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
+            drawioDataXML = xml;
+            loadDrawioXml(xml);
+          } catch (localErr: any) {
+            console.error("Local geometric compilation failed, falling back to server...", localErr);
+            setDrawioStatus("loading");
+            const fallbackRes = await fetch("/api/generate", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ stage: 3, blueprint: targetBlueprint })
+            });
+            if (fallbackRes.ok) {
+              const { xml } = await fallbackRes.json();
+              drawioDataXML = xml;
+              loadDrawioXml(xml);
+            } else {
+              // Last resort: embed rendered SVG if available
+              if (renderedSvg) {
+                try {
+                  const xml = compileSvgToDrawioXml(renderedSvg);
+                  drawioDataXML = xml;
+                  loadDrawioXml(xml);
+                } catch {
+                  throw new Error("All draw.io compilation methods failed.");
+                }
+              } else {
+                throw new Error("Both local layout compilation and server-side fallback processes failed.");
+              }
+            }
+          }
+        }
+      } else {
+        // Gemini server-side compiler
+        if (needsSvgEmbed && renderedSvg) {
+          // For non-flowchart types, prefer the fast SVG-embed path rather than
+          // making a server round-trip that produces suboptimal results anyway.
+          try {
+            const xml = compileSvgToDrawioXml(renderedSvg);
+            drawioDataXML = xml;
+            loadDrawioXml(xml);
+          } catch (svgErr: any) {
+            setDrawioStatus("error");
+            setDrawioError(svgErr.message || "Failed to embed diagram into draw.io.");
+          }
+        } else {
+          const serverS3Res = await fetch("/api/generate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ stage: 3, blueprint: targetBlueprint })
           });
-          if (fallbackRes.ok) {
-            const { xml } = await fallbackRes.json();
+          if (serverS3Res.ok) {
+            const { xml } = await serverS3Res.json();
             drawioDataXML = xml;
-            setDrawioXML(xml);
-            setDrawioStatus("loaded");
-            if (drawioReady) {
-              iframeRef.current?.contentWindow?.postMessage(
-                JSON.stringify({ action: "load", xml, autosave: 1 }),
-                "*"
-              );
-            }
+            loadDrawioXml(xml);
           } else {
-            throw new Error("Both local layout compilation and server-side fallback processes failed.");
-          }
-        }
-      } else {
-        const serverS3Res = await fetch("/api/generate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ stage: 3, blueprint: targetBlueprint })
-        });
-        if (serverS3Res.ok) {
-          const { xml } = await serverS3Res.json();
-          drawioDataXML = xml;
-          setDrawioXML(xml);
-          setDrawioStatus("loaded");
-
-          if (drawioReady) {
-            iframeRef.current?.contentWindow?.postMessage(
-              JSON.stringify({ action: "load", xml, autosave: 1 }),
-              "*"
-            );
-          }
-        } else {
-          try {
-            const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
-            drawioDataXML = xml;
-            setDrawioXML(xml);
-            setDrawioStatus("loaded");
-            if (drawioReady) {
-              iframeRef.current?.contentWindow?.postMessage(
-                JSON.stringify({ action: "load", xml, autosave: 1 }),
-                "*"
-              );
+            // Server failed — fall back to SVG embed or deterministic
+            try {
+              if (renderedSvg) {
+                const xml = compileSvgToDrawioXml(renderedSvg);
+                drawioDataXML = xml;
+                loadDrawioXml(xml);
+              } else {
+                const xml = compileBlueprintToDrawio(targetBlueprint, canvasSvg || undefined, resolvedLogos);
+                drawioDataXML = xml;
+                loadDrawioXml(xml);
+              }
+            } catch (localFallbackErr: any) {
+              setDrawioStatus("error");
+              setDrawioError(localFallbackErr.message || "Failed to generate diagram for editor.");
             }
-          } catch (localFallbackErr: any) {
-            setDrawioStatus("error");
-            setDrawioError(localFallbackErr.message || "Failed to generate standard selectable elements.");
           }
         }
       }
@@ -1942,6 +1998,15 @@ export default function Home() {
     }
     setDrawioStatus("loading");
     setDrawioError(null);
+
+    const NON_FLOWCHART_KINDS = new Set([
+      "er", "sequence", "class", "state",
+      "gantt", "timeline", "mindmap", "quadrant",
+      "c4context", "c4container", "c4component",
+    ]);
+    const diagramKind = (lastBlueprint?.diagramKind || "flowchart").toLowerCase();
+    const needsSvgEmbed = NON_FLOWCHART_KINDS.has(diagramKind);
+
     try {
       if (compilerMethod === "visual") {
         if (canvasSvg) {
@@ -1975,37 +2040,75 @@ export default function Home() {
           throw new Error("SVG content not found for Visual parity compiler.");
         }
       } else if (compilerMethod === "deterministic") {
-        const xml = compileBlueprintToDrawio(lastBlueprint, canvasSvg || undefined, resolvedLogos);
-        setDrawioXML(xml);
-        setDrawioStatus("loaded");
-        if (drawioReady) {
-          iframeRef.current?.contentWindow?.postMessage(
-            JSON.stringify({ action: "load", xml, autosave: 1 }),
-            "*"
-          );
+        if (needsSvgEmbed) {
+          // Non-flowchart types: embed the SVG instead of using the geometric compiler
+          const svgSource = canvasSvg || (mermaidCode ? await renderMermaidMarkup(mermaidCode) : null);
+          if (svgSource) {
+            const xml = compileSvgToDrawioXml(svgSource as string);
+            setDrawioXML(xml);
+            setDrawioStatus("loaded");
+            if (drawioReady) {
+              iframeRef.current?.contentWindow?.postMessage(
+                JSON.stringify({ action: "load", xml, autosave: 1 }),
+                "*"
+              );
+            }
+            triggerToast("Diagram loaded into editor successfully! ✓", false);
+          } else {
+            throw new Error("No rendered SVG available to embed.");
+          }
+        } else {
+          const xml = compileBlueprintToDrawio(lastBlueprint, canvasSvg || undefined, resolvedLogos);
+          setDrawioXML(xml);
+          setDrawioStatus("loaded");
+          if (drawioReady) {
+            iframeRef.current?.contentWindow?.postMessage(
+              JSON.stringify({ action: "load", xml, autosave: 1 }),
+              "*"
+            );
+          }
+          triggerToast("Selectable elements re-compiled successfully! ✓", false);
         }
-        triggerToast("Selectable elements re-compiled successfully! ✓", false);
       } else {
-        const res = await fetch("/api/generate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ stage: 3, blueprint: lastBlueprint })
-        });
-        if (!res.ok) {
-          let errMsg = "Retry compilation failed.";
-          try { const j = await res.json(); errMsg = j.error || errMsg; } catch { errMsg = `Server error ${res.status}`; }
-          throw new Error(errMsg);
+        if (needsSvgEmbed && (canvasSvg || mermaidCode)) {
+          // Non-flowchart: prefer SVG embed over a Gemini server round-trip
+          const svgSource = canvasSvg || (mermaidCode ? await renderMermaidMarkup(mermaidCode) : null);
+          if (svgSource) {
+            const xml = compileSvgToDrawioXml(svgSource as string);
+            setDrawioXML(xml);
+            setDrawioStatus("loaded");
+            if (drawioReady) {
+              iframeRef.current?.contentWindow?.postMessage(
+                JSON.stringify({ action: "load", xml, autosave: 1 }),
+                "*"
+              );
+            }
+            triggerToast("Diagram loaded into editor successfully! ✓", false);
+          } else {
+            throw new Error("No rendered SVG available to embed.");
+          }
+        } else {
+          const res = await fetch("/api/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ stage: 3, blueprint: lastBlueprint })
+          });
+          if (!res.ok) {
+            let errMsg = "Retry compilation failed.";
+            try { const j = await res.json(); errMsg = j.error || errMsg; } catch { errMsg = `Server error ${res.status}`; }
+            throw new Error(errMsg);
+          }
+          const { xml } = await res.json();
+          setDrawioXML(xml);
+          setDrawioStatus("loaded");
+          if (drawioReady) {
+            iframeRef.current?.contentWindow?.postMessage(
+              JSON.stringify({ action: "load", xml, autosave: 1 }),
+              "*"
+            );
+          }
+          triggerToast("Selectable elements re-compiled successfully! ✓", false);
         }
-        const { xml } = await res.json();
-        setDrawioXML(xml);
-        setDrawioStatus("loaded");
-        if (drawioReady) {
-          iframeRef.current?.contentWindow?.postMessage(
-            JSON.stringify({ action: "load", xml, autosave: 1 }),
-            "*"
-          );
-        }
-        triggerToast("Selectable elements re-compiled successfully! ✓", false);
       }
     } catch (err: any) {
       setDrawioStatus("error");
