@@ -36,7 +36,7 @@ Strict rules:
 
 JSON SCHEMA:
 {
-  "diagramKind": "flowchart" | "sequence" | "er" | "class" | "state" | "c4context" | "c4container" | "c4component" | "gantt" | "timeline" | "mindmap" | "quadrant",
+  "diagramKind": "flowchart" | "sequence" | "er" | "class" | "state" | "c4context" | "c4container" | "c4component" | "gantt" | "timeline" | "mindmap" | "quadrant" | "archimate" | "bpmn" | "dfd" | "vsm" | "capability_map" | "network_topology" | "deployment" | "component" | "use_case" | "activity" | "communication" | "package" | "object" | "timing" | "interaction_overview" | "it_roadmap" | "service_blueprint" | "swimlane",
   "direction": "TD" | "LR",
   "title": "short, highly professional descriptive title",
   "groups": [
@@ -47,8 +47,8 @@ JSON SCHEMA:
         {
           "id": "node_snake_id",
           "label": "emoji + 2-4 words display label",
-          "shape": "rect" | "round" | "diamond" | "cylinder" | "hexagon" | "stadium",
-          "type": "service" | "database" | "external" | "ui" | "queue" | "gateway" | "process" | "person" | "system" | "container" | "component" | "external_system"
+          "shape": "rect" | "round" | "diamond" | "cylinder" | "hexagon" | "stadium" | "ellipse" | "actor",
+          "type": "service" | "database" | "external" | "ui" | "queue" | "gateway" | "process" | "person" | "system" | "container" | "component" | "external_system" | "actor" | "use_case_node" | "gateway" | "event" | "task" | "store" | "artefact" | "node" | "layer" | "capability" | "device" | "swimlane_lane"
         }
       ]
     }
@@ -68,7 +68,25 @@ Classification Guidance:
 - Sequence Diagrams: For message passing over time. Nodes represent participants, and edges are ordered events with descriptions.
 - ER Diagrams: Entity relations. One primary group and edges denoting relationships.
 - Flowcharts: For custom cloud infrastructures, pipelines, networks, and modular diagrams. Highly visual.
-- Planning: Use "gantt" for timelines and projects, "timeline" for cron events, "mindmap" for brainstorming, "quadrant" for 2x2 matrix categorizations.`;
+- Planning: Use "gantt" for timelines and projects, "timeline" for cron events, "mindmap" for brainstorming, "quadrant" for 2x2 matrix categorizations.
+- archimate: For layered enterprise architecture views with ArchiMate-style layers (Motivation, Strategy, Business, Application, Technology). Use groups as layers.
+- bpmn: For business process flows with pools, lanes, tasks, gateways, start/end events. Use groups as pools/lanes.
+- dfd: For Data Flow Diagrams. External entities=rect, processes=round, data stores=cylinder.
+- vsm: For Value Stream Maps with process boxes, inventory, and timeline.
+- capability_map: For Business/IT capability heat-maps. Groups=domains, nodes=capabilities.
+- network_topology: For physical/logical network diagrams. Nodes=devices (routers, switches, servers, firewalls).
+- deployment: For UML Deployment Diagrams. Groups=nodes/environments, nodes=artefacts.
+- component: For UML Component Diagrams. Groups=subsystems, nodes=components.
+- use_case: For UML Use Case Diagrams. Groups=system boundary, nodes=actors and use cases.
+- activity: For UML Activity Diagrams. Nodes=actions, decisions, forks.
+- communication: For UML Communication Diagrams. Nodes=objects, edges=numbered messages.
+- package: For UML Package Diagrams. Groups=packages, nodes=classifiers.
+- object: For UML Object Diagrams. Nodes=instances, edges=links.
+- timing: For UML Timing Diagrams. Groups=lifelines, nodes=states over time axis.
+- interaction_overview: For UML Interaction Overview. Nodes=ref frames and decisions.
+- it_roadmap: For IT/Product Roadmaps. Groups=planning horizons, nodes=initiatives/milestones.
+- service_blueprint: For Service Blueprints. Groups=service layers, nodes=touchpoints/actions.
+- swimlane: For Cross-functional Swimlane flowcharts. Groups=lanes (actors), nodes=process steps.`;
 
 const REFINER_SYSTEM = `You are an expert enterprise systems architect and design diagrams editor.
 Your task is to take an existing Blueprint JSON representing an architecture layout, and apply a natural language modification instruction to it.
@@ -176,6 +194,37 @@ WRONG:
   C4ContextPerson(personAlias, "Customer")System(systemAlias, "E-Commerce")
 
 ══════════════════════════════════════════════
+RULE 7 — classDef IS ONLY VALID IN FLOWCHART
+══════════════════════════════════════════════
+classDef and class statements ONLY work inside flowchart diagrams.
+NEVER add classDef or class statements to: erDiagram, sequenceDiagram, classDiagram,
+stateDiagram-v2, gantt, timeline, mindmap, quadrantChart, or C4 diagrams.
+Adding classDef to those diagram types will CRASH the parser immediately.
+
+WRONG — will crash erDiagram:
+  erDiagram
+  classDef database fill:#1a2e2b,stroke:#38d9c0  ← ILLEGAL, crashes parser
+  USERS ||--o{ ORDERS : "places"
+
+CORRECT erDiagram — no classDef at all:
+  erDiagram
+  USERS ||--o{ ORDERS : "places"
+  ORDERS ||--|{ ORDER_ITEMS : "contains"
+
+══════════════════════════════════════════════
+RULE 8 — EVERY DIAGRAM MUST HAVE CONNECTIONS
+══════════════════════════════════════════════
+Every diagram MUST have meaningful edges/relationships between nodes.
+An isolated node with no connections is a design flaw.
+- flowchart/bpmn/dfd/vsm/swimlane/activity: use --> or -.-> arrows between EVERY step
+- erDiagram: every entity MUST have at least one relationship line ||--o{ or }|--|{
+- sequenceDiagram: every participant MUST appear in at least one message ->>
+- classDiagram: every class MUST have at least one association, inheritance, or dependency
+- C4 diagrams: every Person/System/Container MUST have at least one Rel() call
+- state diagrams: every state MUST have at least one transition
+- Isolated nodes with no edges are NOT acceptable
+
+══════════════════════════════════════════════
 SELF-CHECK BEFORE OUTPUTTING
 ══════════════════════════════════════════════
 Before returning your output, scan every line and verify:
@@ -184,6 +233,8 @@ Before returning your output, scan every line and verify:
 3. Does \`direction\` appear anywhere except as the only token on its line? → Split it.
 4. Does any node label contain spaces without double quotes? → Add quotes.
 5. Is there any text before the diagram type declaration? → Remove it.
+6. Does the diagram type require connections/edges? → Ensure EVERY node has at least one connection.
+7. Is this NOT a flowchart diagram? → Remove ALL classDef and class lines — they CRASH non-flowchart parsers.
 If any check fails, fix it before outputting.
 
 Node IDs must strictly match [a-zA-Z][a-zA-Z0-9_]*.
@@ -225,23 +276,40 @@ GUIDELINES BY KIND:
   First line: sequenceDiagram
   Participants: participant alias as "Name" (each on its own line)
   Messages: A ->> B: message (each on its own line)
+  REQUIRED: Every participant MUST send or receive at least one message. Minimum 4 messages.
+  NO classDef. NO class statements. These crash sequenceDiagram.
 
 - er:
   First line: erDiagram
   Relationships: ENTITY1 ||--o{ ENTITY2 : "label" (each on its own line)
+  REQUIRED: Every entity MUST have at least one relationship. Minimum 5 relationships.
+  Cardinality options: ||--o{ (one-to-many), }|--|{ (many-to-many), ||--|| (one-to-one).
+  NO classDef. NO class statements. These CRASH erDiagram immediately.
+
+  CORRECT erDiagram example:
+  erDiagram
+  USERS ||--o{ ORDERS : "places"
+  ORDERS ||--|{ ORDER_ITEMS : "contains"
+  PRODUCTS ||--o{ ORDER_ITEMS : "included in"
 
 - class:
   First line: classDiagram
   Classes and associations each on their own line.
+  REQUIRED: Every class MUST have at least one association. Use <|-- for inheritance, --> for association, ..> for dependency.
+  NO classDef. NO class color statements — classDiagram has its own syntax which does not use classDef from flowchart.
 
 - state:
   First line: stateDiagram-v2
   Transitions each on their own line.
+  REQUIRED: Every state MUST have at least one transition. Include [*] --> InitialState and FinalState --> [*].
+  NO classDef. NO class statements. These crash stateDiagram.
 
 - c4context / c4container / c4component:
   First line: C4Context (or C4Container / C4Component)
   title, direction, Person(), System(), Rel(), LAYOUT_WITH_LEGEND() — each MUST be on its own line.
   LAYOUT_WITH_LEGEND() must be the last line.
+  REQUIRED: Every Person and System MUST appear in at least one Rel() call.
+  NO classDef. NO class statements. These crash C4 diagrams.
 
   EXACT OUTPUT FORMAT:
   C4Context
@@ -255,18 +323,141 @@ GUIDELINES BY KIND:
 - gantt:
   First line: gantt
   title, dateFormat, section, and tasks each on their own line.
+  REQUIRED: At least 3 sections with 2+ tasks each.
+  NO classDef. NO class statements.
 
 - timeline:
   First line: timeline
   title, section, and events each on their own line.
+  REQUIRED: At least 3 time periods with events.
+  NO classDef. NO class statements.
 
 - mindmap:
   First line: mindmap
   Root and branches indented by 2 spaces per level.
+  REQUIRED: Root node with at least 4 branches, each with 2+ sub-branches.
+  NO classDef. NO class statements.
 
 - quadrant:
   First line: quadrantChart
   x-axis, y-axis, quadrant labels, and items each on their own line.
+  REQUIRED: All 4 quadrants labelled. At least 8 items placed in the quadrant.
+  NO classDef. NO class statements.
+
+- bpmn:
+  First line: %%{init: {"theme": "dark", "flowchart": {"curve": "stepBefore"}}}%%
+  Second line: flowchart TD
+  Use subgraph per pool/lane. Tasks=rect nodes, Gateways=diamond nodes, Start events=stadium nodes (🟢 prefix), End events=hexagon nodes (🔴 prefix).
+  Inter-pool message flows use dashed edges.
+  classDef task fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
+  classDef gateway fill:#2a1a18,stroke:#f87171,color:#e4eaf8;
+  classDef event fill:#0e1f28,stroke:#38d9c0,color:#e4eaf8;
+
+- archimate:
+  flowchart TD with subgraphs for each layer (Motivation, Strategy, Business, Application, Technology, Physical).
+  Layer labels must include emoji: "🎯 Motivation", "📋 Strategy", "💼 Business", "⚙️ Application", "🖥️ Technology".
+  Direction TD (layers stack vertically). Serving/realisation edges = dashed. Assignment edges = solid.
+  classDef motivation fill:#1a1224,stroke:#9d72ff,color:#e4eaf8;
+  classDef business fill:#1a2035,stroke:#fbbf24,color:#e4eaf8;
+  classDef application fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8;
+  classDef technology fill:#111215,stroke:#5b8df8,color:#e4eaf8;
+
+- dfd:
+  flowchart TD. External entities=rect with 🔲 prefix. Processes=round with ⚙️ prefix. Data stores=cylinder with 🗄️ prefix.
+  All edges labelled with data item name.
+  classDef external fill:#25183a,stroke:#9d72ff,color:#e4eaf8;
+  classDef process fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
+  classDef store fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8;
+
+- vsm:
+  flowchart LR. Process boxes=rect with ⚙️. Inventory triangles between processes=diamond with 📦. Push arrows=solid, pull arrows=dashed.
+  Last subgraph is "⏱️ Timeline" with lead time nodes.
+  classDef process fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
+  classDef inventory fill:#2a1a18,stroke:#f87171,color:#e4eaf8;
+
+- capability_map:
+  flowchart TD. subgraphs for capability domains. Capabilities are rect nodes coloured by maturity (1=red, 2=orange, 3=yellow, 4=green, 5=bright green).
+  classDef mat1 fill:#4a1a1a,stroke:#f87171,color:#e4eaf8;
+  classDef mat2 fill:#3a2a1a,stroke:#fbbf24,color:#e4eaf8;
+  classDef mat3 fill:#2a3a1a,stroke:#d4ff00,color:#e4eaf8;
+  classDef mat4 fill:#1a3a2a,stroke:#38d9c0,color:#e4eaf8;
+  classDef mat5 fill:#1a2a3a,stroke:#5b8df8,color:#e4eaf8;
+
+- network_topology:
+  flowchart TD. Servers=cylinder with 🖥️. Routers/switches=hexagon with 🔀. Firewalls=stadium with 🔥. Clients=rect with 💻. Cloud=round with ☁️.
+  Edges labelled with protocol (TCP/IP, HTTPS, etc.) and bandwidth.
+  classDef server fill:#101614,stroke:#38d9c0,color:#e4eaf8;
+  classDef network fill:#1c1110,stroke:#ef4444,color:#e4eaf8;
+  classDef firewall fill:#0e1f28,stroke:#fbbf24,color:#e4eaf8;
+
+- deployment:
+  flowchart TD. Deployment nodes=subgraphs with 🖥️ labels. Execution environments=nested subgraphs. Artefacts=stadium nodes with 📦.
+  Deploy edges=dashed. Communication edges=solid.
+  classDef node fill:#111215,stroke:#5b8df8,color:#e4eaf8;
+  classDef artefact fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8;
+
+- component:
+  flowchart TD. Components=rect with ⚙️. Interfaces=small round nodes with 🔌. Dependencies=dashed arrows. Composition=solid arrows.
+  classDef component fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
+  classDef interface fill:#0e1f28,stroke:#38d9c0,color:#e4eaf8;
+
+- use_case:
+  flowchart TD. System boundary=subgraph with dashed style. Actors=stadium with 👤. Use cases=round with ○.
+  Include=dashed with "«include»" label. Extend=dashed with "«extend»" label.
+  classDef actor fill:#0c1524,stroke:#3b82f6,color:#e4eaf8;
+  classDef usecase fill:#1a2035,stroke:#9d72ff,color:#e4eaf8;
+
+- activity:
+  flowchart TD. Actions=rect. Decisions=diamond. Fork/join=hexagon (◼ prefix). Initial=stadium (⬤). Final=hexagon (⊗).
+  Guard conditions on edges in square brackets.
+  classDef action fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
+  classDef decision fill:#2a1a18,stroke:#fbbf24,color:#e4eaf8;
+  classDef fork fill:#111215,stroke:#999999,color:#e4eaf8;
+
+- communication:
+  flowchart LR. Objects=rect. Messages=edges labelled with sequence number: "1: methodName()".
+  Bidirectional messages use two separate edges with numbers.
+  classDef object fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
+
+- package:
+  flowchart TD. Packages=subgraphs. Classifiers inside=rect. Dependency arrows=dashed. Import=dashed with "«import»". Merge=dashed with "«merge»".
+  classDef classifier fill:#1a2035,stroke:#9d72ff,color:#e4eaf8;
+
+- object:
+  flowchart TD. Object instances=rect, label format "instanceName : ClassName" (underline implied). Attribute slots in label (multiline using <br/>).
+  Links=solid edges. Dependency=dashed.
+  classDef instance fill:#1a2035,stroke:#38d9c0,color:#e4eaf8;
+
+- timing:
+  flowchart LR. One row per lifeline = one subgraph. State-value nodes along horizontal axis=rect with state label. Time transitions=solid edges rightward.
+  State changes=vertical dashed edges between states.
+  classDef state fill:#1a2035,stroke:#38d9c0,color:#e4eaf8;
+
+- interaction_overview:
+  flowchart TD. Reference frames=round with "ref: Name" label. Combined fragments=diamond. Sequential flow=solid. Alt/loop=dashed.
+  classDef ref fill:#25183a,stroke:#9d72ff,color:#e4eaf8;
+  classDef fragment fill:#2a1a18,stroke:#fbbf24,color:#e4eaf8;
+
+- it_roadmap:
+  flowchart LR. subgraphs for planning horizons: "🟢 Now (Q1-Q2)", "🟡 Next (Q3-Q4)", "🔵 Later (FY+1)".
+  Initiatives=rect inside horizons. Milestones=diamond with 🎯. Phase gates=stadium with 🚦.
+  Dependency arrows between initiatives. Timeline flows left to right.
+  classDef initiative fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
+  classDef milestone fill:#0e1f28,stroke:#d4ff00,color:#e4eaf8;
+
+- service_blueprint:
+  flowchart LR. One subgraph per service layer (top to bottom): "👤 Customer Actions", "🎭 Frontstage", "👁️ Line of Visibility", "⚙️ Backstage", "🔧 Support Processes", "📦 Physical Evidence".
+  Touchpoints=rect. Actions=round. Vertical inter-layer linking edges=dashed.
+  classDef customer fill:#0c1524,stroke:#3b82f6,color:#e4eaf8;
+  classDef frontstage fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8;
+  classDef backstage fill:#25183a,stroke:#9d72ff,color:#e4eaf8;
+
+- swimlane:
+  flowchart LR (or TD based on blueprint direction). One subgraph per lane (actor/department).
+  Process steps=rect. Decisions=diamond. Start=stadium (▶). End=hexagon (⏹).
+  Cross-lane handoff edges=solid with activity label. Return flows=dashed.
+  classDef step fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
+  classDef decision fill:#2a1a18,stroke:#fbbf24,color:#e4eaf8;
 `;
 }
 
@@ -338,6 +529,33 @@ function sanitizeContent(text: string): string {
   clean = clean.replace(/\{[^{}]*(?:class|shape|style|fill|stroke)[^{}]*\}/gi, "");
   // ── END STRIP INVALID NODE ATTRIBUTE BAGS ─────────────────────────────────
 
+  // ── STRIP classDef/class FROM NON-FLOWCHART DIAGRAMS ─────────────────────
+  // classDef and class assignment lines are ONLY valid inside flowchart.
+  // When emitted inside erDiagram/sequenceDiagram/classDiagram/stateDiagram-v2/
+  // gantt/timeline/mindmap/quadrantChart the parser crashes immediately.
+  {
+    const firstMeaningfulLine = clean
+      .split("\n")
+      .find((l: string) => l.trim() && !l.trim().startsWith("%%"))
+      ?.trim()
+      ?.toLowerCase() || "";
+    const isFlowchartBase =
+      firstMeaningfulLine.startsWith("flowchart") ||
+      firstMeaningfulLine.startsWith("graph ");
+    if (!isFlowchartBase) {
+      clean = clean
+        .split("\n")
+        .filter((l: string) => {
+          const t = l.trim();
+          if (/^classDef\s+\w+/i.test(t)) return false;
+          if (/^class\s+\w+\s+\w+$/i.test(t) && !firstMeaningfulLine.startsWith("classdiagram")) return false;
+          return true;
+        })
+        .join("\n");
+    }
+  }
+  // ── END STRIP classDef/class FROM NON-FLOWCHART DIAGRAMS ─────────────────
+
   // ── STEP 0: Direct regex keyword injection ────────────────────────────────
   // Targeted pre-pass first — handles the specific crash pattern
   // "Xdirection TDKeyword(" before the general loop runs.
@@ -355,6 +573,10 @@ function sanitizeContent(text: string): string {
     ];
     clean = clean.replace(/([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi, (m: string, a: string, b: string) => a + "\n" + b);
     clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))([^\n\s])/gi, (m: string, a: string, b: string) => a + "\n" + b);
+    // Split bracket/quote close immediately before direction (subgraph label squash)
+    clean = clean.replace(/([\]"'])\s*(direction\s+(?:TD|LR|TB|BT|RL))/gi, (m: string, a: string, b: string) => a + "\n" + b);
+    // Split node definition squashed directly after direction TD
+    clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([a-zA-Z][a-zA-Z0-9_]*\s*[\[({])/gi, (m: string, a: string, b: string) => a + "\n" + b);
     for (const kw of DIR_KW) {
       clean = clean.replace(
         new RegExp(`(direction\\s+(?:TD|LR|TB|BT|RL))\\s*(${kw}\\b)`, "gi"),
@@ -576,6 +798,13 @@ function sanitizeContent(text: string): string {
   // `class nodeId className` statements that the LLM already generates separately.
   clean = clean.replace(/(\{[^{}]*(?:class|shape|style|fill|stroke)[^{}]*\})/gi, "");
   // ── END STRIP INVALID NODE ATTRIBUTE BAGS ─────────────────────────────────
+
+  // ── B2/B3: explicit subgraph-label / node-definition direction splits ──────
+  // Handles: subgraph id ["label"]direction TD  (bracket/quote close before direction)
+  clean = clean.replace(/([\]"'])\s*(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+  // Handles: direction TDnodeId["label"] (node definition immediately after direction)
+  clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([a-zA-Z][a-zA-Z0-9_]*\s*[\[({])/gi, "$1\n$2");
+  // ── END B2/B3 ──────────────────────────────────────────────────────────────
 
   // ── NUCLEAR DIRECTION PASS: ensure `direction TD/LR/...` is always isolated on its own line
   clean = clean.replace(/([^\n]+?)\s*(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n]+)/gi, (_, before, dir, after) => {

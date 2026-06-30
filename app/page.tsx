@@ -40,7 +40,18 @@ const EXAMPLES = {
   database: `An e-commerce database schema with Users, Orders, OrderItems, Products, Categories, Reviews, Addresses, and Payments tables showing primary keys and relationships.`,
   cloud: `An AWS cloud infrastructure with a VPC containing public and private subnets, an Application Load Balancer, ECS Fargate containers, RDS Aurora, ElastiCache Redis, S3 for assets, CloudFront CDN, and Route 53 DNS.`,
   c4: `A C4 System Context diagram for an online banking platform showing customers, internal banking system, email notification system, and external payment gateway.`,
-  roadmap: `A 12-month product roadmap for a SaaS platform with Q1 foundation work (auth, billing), Q2 core features (dashboard, reporting), Q3 integrations (Salesforce, Slack), and Q4 scaling (performance, enterprise SSO).`
+  roadmap: `A 12-month product roadmap for a SaaS platform with Q1 foundation work (auth, billing), Q2 core features (dashboard, reporting), Q3 integrations (Salesforce, Slack), and Q4 scaling (performance, enterprise SSO).`,
+  bpmn: `An order fulfillment BPMN process with Customer pool (place order, receive confirmation), Sales pool (validate order, check inventory, approve), Warehouse pool (pick items, pack, ship), and Finance pool (invoice, payment processing).`,
+  archimate: `An insurance company ArchiMate view showing Motivation layer (goals: digital transformation), Business layer (claim processing, policy management), Application layer (CRM, policy system, claims engine), Technology layer (AWS cloud, microservices, databases).`,
+  dfd: `A hospital patient management system data flow showing external entities (Patient, Doctor, Insurance), processes (Patient Registration, Appointment Scheduling, Billing), and data stores (Patient Records, Appointment Database, Billing System).`,
+  vsm: `A software feature delivery value stream map showing steps: Concept, Development, Code Review, Testing, Staging, Production with lead times and cycle times at each step.`,
+  capability_map: `An e-commerce business capability map showing domains: Customer Management (CRM, Loyalty, Support), Order Management (Cart, Checkout, Fulfillment), Product Management (Catalog, Pricing, Inventory), Finance (Billing, Reporting, Fraud Detection).`,
+  network_topology: `A corporate network topology with Internet, DMZ zone (firewall, load balancer, web servers), Internal zone (application servers, microservices cluster), Data zone (primary database, replica, backup), and Management zone (monitoring, logging).`,
+  swimlane: `A customer onboarding process with swimlanes for Customer (submit application, provide documents, sign agreement), Sales (review application, create quote, send contract), Compliance (KYC check, risk assessment), and Operations (provision account, send welcome kit).`,
+  it_roadmap: `A 12-month IT modernisation roadmap with Now (Q1-Q2): legacy decommission, API gateway rollout; Next (Q3-Q4): cloud migration, microservices refactoring; Later (FY+1): AI/ML platform, self-service portal.`,
+  service_blueprint: `A hotel check-in service blueprint with Customer Actions (arrive, request room, receive key), Frontstage (greet guest, verify booking), Line of Visibility, Backstage (update PMS, assign room), Support Processes (housekeeping, IT systems), Physical Evidence (lobby, key card, receipt).`,
+  use_case: `A banking system use case diagram with actors (Customer, Bank Teller, System Administrator), use cases (Login, View Balance, Transfer Funds, Manage Accounts, Generate Reports), and include/extend relationships.`,
+  deployment: `A Kubernetes deployment diagram with Cloud Provider node containing: Cluster node (API Server, etcd), Worker Nodes (each with kubelet, container runtime, application pods), External Load Balancer, Persistent Volume storage.`,
 };
 
 // File exporter helper defined at module scope to avoid purity and hoisting warnings
@@ -765,16 +776,7 @@ export default function Home() {
     setDrawioError(null);
     setDrawioStatus("loading");
 
-    // Diagram kinds where compileBlueprintToDrawio produces empty/wrong output
-    // because they don't use the groups/nodes/edges structure.
-    // For these, compileSvgToDrawioXml (SVG-embed) is always the right path.
-    const NON_FLOWCHART_KINDS = new Set([
-      "er", "sequence", "class", "state",
-      "gantt", "timeline", "mindmap", "quadrant",
-      "c4context", "c4container", "c4component",
-    ]);
-    const diagramKind = (targetBlueprint?.diagramKind || "flowchart").toLowerCase();
-    const needsSvgEmbed = NON_FLOWCHART_KINDS.has(diagramKind);
+    // All diagram types now compile to native draw.io XML via compileBlueprintToDrawio.
 
     // Helper: load an XML string into the draw.io iframe and update state.
     // Also writes to drawioXmlRef immediately so the iframe `init` event handler
@@ -821,130 +823,47 @@ export default function Home() {
 
       let drawioDataXML: string | null = null;
 
-      if (compilerMethod === "visual") {
-        // Visual: always embed the rendered SVG, works for every diagram type
-        if (renderedSvg) {
-          try {
-            const xml = compileSvgToDrawioXml(renderedSvg);
-            drawioDataXML = xml;
-            loadDrawioXml(xml);
-          } catch (localErr: any) {
-            console.error("Visual SVG compilation to drawio failed, falling back to deterministic...", localErr);
-            try {
-              const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
-              drawioDataXML = xml;
-              loadDrawioXml(xml);
-            } catch (fallbackErr: any) {
-              setDrawioStatus("error");
-              setDrawioError(fallbackErr.message || "Failed to compile visual diagram.");
-            }
-          }
-        } else {
-          // No SVG rendered — fall back to deterministic for flowcharts, error for others
-          if (!needsSvgEmbed) {
-            try {
-              const xml = compileBlueprintToDrawio(targetBlueprint, canvasSvg || undefined, resolvedLogos);
-              drawioDataXML = xml;
-              loadDrawioXml(xml);
-            } catch (fallbackErr: any) {
-              setDrawioStatus("error");
-              setDrawioError("No SVG rendered and deterministic fallback failed.");
-            }
-          } else {
-            setDrawioStatus("error");
-            setDrawioError("Diagram could not be rendered. Please try again.");
-          }
-        }
-      } else if (compilerMethod === "deterministic") {
-        if (needsSvgEmbed) {
-          // Non-flowchart types: compileBlueprintToDrawio can't handle them.
-          // Use the rendered SVG as an embedded image — same as "visual" mode.
-          if (renderedSvg) {
-            try {
-              const xml = compileSvgToDrawioXml(renderedSvg);
-              drawioDataXML = xml;
-              loadDrawioXml(xml);
-            } catch (svgErr: any) {
-              setDrawioStatus("error");
-              setDrawioError(svgErr.message || "Failed to embed diagram into draw.io.");
-            }
-          } else {
-            setDrawioStatus("error");
-            setDrawioError("Diagram could not be rendered. Please try again.");
-          }
-        } else {
-          // Flowchart: use the deterministic geometric compiler
-          try {
-            const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
-            drawioDataXML = xml;
-            loadDrawioXml(xml);
-          } catch (localErr: any) {
-            console.error("Local geometric compilation failed, falling back to server...", localErr);
-            setDrawioStatus("loading");
-            const fallbackRes = await fetch("/api/generate", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ stage: 3, blueprint: targetBlueprint })
-            });
-            if (fallbackRes.ok) {
-              const { xml } = await fallbackRes.json();
-              drawioDataXML = xml;
-              loadDrawioXml(xml);
-            } else {
-              // Last resort: embed rendered SVG if available
-              if (renderedSvg) {
-                try {
-                  const xml = compileSvgToDrawioXml(renderedSvg);
-                  drawioDataXML = xml;
-                  loadDrawioXml(xml);
-                } catch {
-                  throw new Error("All draw.io compilation methods failed.");
-                }
-              } else {
-                throw new Error("Both local layout compilation and server-side fallback processes failed.");
-              }
-            }
-          }
-        }
-      } else {
-        // Gemini server-side compiler
-        if (needsSvgEmbed && renderedSvg) {
-          // For non-flowchart types, prefer the fast SVG-embed path rather than
-          // making a server round-trip that produces suboptimal results anyway.
-          try {
-            const xml = compileSvgToDrawioXml(renderedSvg);
-            drawioDataXML = xml;
-            loadDrawioXml(xml);
-          } catch (svgErr: any) {
-            setDrawioStatus("error");
-            setDrawioError(svgErr.message || "Failed to embed diagram into draw.io.");
-          }
-        } else {
-          const serverS3Res = await fetch("/api/generate", {
+      // All diagram types now compile to native draw.io XML via compileBlueprintToDrawio
+      if (compilerMethod === "visual" || compilerMethod === "deterministic") {
+        try {
+          const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
+          drawioDataXML = xml;
+          loadDrawioXml(xml);
+        } catch (localErr: any) {
+          // fallback to server
+          const fallbackRes = await fetch("/api/generate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ stage: 3, blueprint: targetBlueprint })
           });
-          if (serverS3Res.ok) {
-            const { xml } = await serverS3Res.json();
+          if (fallbackRes.ok) {
+            const { xml } = await fallbackRes.json();
             drawioDataXML = xml;
             loadDrawioXml(xml);
           } else {
-            // Server failed — fall back to SVG embed or deterministic
-            try {
-              if (renderedSvg) {
-                const xml = compileSvgToDrawioXml(renderedSvg);
-                drawioDataXML = xml;
-                loadDrawioXml(xml);
-              } else {
-                const xml = compileBlueprintToDrawio(targetBlueprint, canvasSvg || undefined, resolvedLogos);
-                drawioDataXML = xml;
-                loadDrawioXml(xml);
-              }
-            } catch (localFallbackErr: any) {
-              setDrawioStatus("error");
-              setDrawioError(localFallbackErr.message || "Failed to generate diagram for editor.");
-            }
+            setDrawioStatus("error");
+            setDrawioError("Failed to compile diagram for editor.");
+          }
+        }
+      } else {
+        // Gemini server
+        const serverRes = await fetch("/api/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ stage: 3, blueprint: targetBlueprint })
+        });
+        if (serverRes.ok) {
+          const { xml } = await serverRes.json();
+          drawioDataXML = xml;
+          loadDrawioXml(xml);
+        } else {
+          try {
+            const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
+            drawioDataXML = xml;
+            loadDrawioXml(xml);
+          } catch (err: any) {
+            setDrawioStatus("error");
+            setDrawioError(err.message || "Failed to generate diagram for editor.");
           }
         }
       }
@@ -1406,6 +1325,40 @@ export default function Home() {
     // Normalize line endings
     let clean = code.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
+    // ── STRIP classDef/class FROM NON-FLOWCHART DIAGRAMS ─────────────────────
+    // classDef and class assignment statements are ONLY valid inside flowchart.
+    // When the LLM emits them inside erDiagram, sequenceDiagram, classDiagram,
+    // stateDiagram-v2, gantt, timeline, mindmap, or quadrantChart the lexer
+    // immediately crashes with "got ':'" or similar parse errors.
+    // Detect the first meaningful (non-comment) line and strip classDef/class
+    // from the entire code if it is a non-flowchart diagram.
+    {
+      const firstMeaningfulLine = clean
+        .split("\n")
+        .find(l => l.trim() && !l.trim().startsWith("%%"))
+        ?.trim()
+        ?.toLowerCase() || "";
+      const isFlowchartBase =
+        firstMeaningfulLine.startsWith("flowchart") ||
+        firstMeaningfulLine.startsWith("graph ");
+      if (!isFlowchartBase) {
+        // Remove every line that starts with classDef or is a class assignment
+        clean = clean
+          .split("\n")
+          .filter(l => {
+            const t = l.trim();
+            // Remove: classDef name fill:... and class nodeId className
+            if (/^classDef\s+\w+/i.test(t)) return false;
+            // Remove bare `class nodeId someClass` lines (NOT inside classDiagram definitions)
+            // In classDiagram, class is followed by ClassName { not by nodeId classname
+            if (/^class\s+\w+\s+\w+$/i.test(t) && !firstMeaningfulLine.startsWith("classdiagram")) return false;
+            return true;
+          })
+          .join("\n");
+      }
+    }
+    // ── END STRIP classDef/class FROM NON-FLOWCHART DIAGRAMS ─────────────────
+
     // ── STRIP INVALID NODE ATTRIBUTE BAGS ────────────────────────────────────
     // Must run first — before any other pass — because the LLM sometimes emits
     // non-existent Mermaid syntax like:
@@ -1436,6 +1389,13 @@ export default function Home() {
       clean = clean.replace(/([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
       // Step B: split anything immediately after `direction <value>`
       clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))([^\n\s])/gi, "$1\n$2");
+      // Step B2: split bracket/quote close immediately before direction (subgraph label squash)
+      // Handles: subgraph id ["label"]direction TD  →  ["label"]\ndirection TD
+      clean = clean.replace(/([\]"'])\s*(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+      // Step B3: split node definition squashed after direction TD
+      // Handles: direction TDnodeId["label"] or direction TDnodeId("label")
+      // Mermaid crashes with 'got NODE_STRING' when a node follows direction on the same line.
+      clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([a-zA-Z][a-zA-Z0-9_]*\s*[\[({])/gi, "$1\n$2");
       // Step C: split each known keyword when it appears right after direction TD
       for (const kw of DIR_KW) {
         clean = clean.replace(
@@ -1546,6 +1506,14 @@ export default function Home() {
     clean = clean.replace(/\s*LAYOUT_WITH_LEGEND(\(\))?\s*/gi, "\nLAYOUT_WITH_LEGEND()\n");
     clean = clean.replace(/((?:graph|flowchart)\s+(?:TD|LR|RL|BT|TB))\s*(?!\n)/g, "$1\n");
     clean = clean.replace(/(subgraph\s+[^\n]+)\s*(?!\n)/g, "$1\n");
+
+    // ── Re-run B2/B3 direction splits AFTER the subgraph label pass ───────────
+    // The `subgraph\s+[^\n]+` regex above matches the entire squashed line and
+    // only appends \n at the end — leaving direction TD squashes intact mid-line.
+    // Running B2/B3 again here ensures those squashes are still caught.
+    clean = clean.replace(/([\]"'])\s*(direction\s+(?:TD|LR|TB|BT|RL))/gi, "$1\n$2");
+    clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([a-zA-Z][a-zA-Z0-9_]*\s*[\[({])/gi, "$1\n$2");
+    // ── END re-run ────────────────────────────────────────────────────────────
 
     // Wrap bare node labels containing spaces/special chars in quotes
     clean = clean.replace(
@@ -1698,6 +1666,20 @@ export default function Home() {
     const applyPatterns = (input: string): string => {
       let s = input;
 
+      // ── Strip classDef/class from non-flowchart diagrams ──────────────────
+      {
+        const firstLine = s.split("\n").find(l => l.trim() && !l.trim().startsWith("%%"))?.trim()?.toLowerCase() || "";
+        const isFlowchart = firstLine.startsWith("flowchart") || firstLine.startsWith("graph ");
+        if (!isFlowchart) {
+          s = s.split("\n").filter(l => {
+            const t = l.trim();
+            if (/^classDef\s+\w+/i.test(t)) return false;
+            if (/^class\s+\w+\s+\w+$/i.test(t) && !firstLine.startsWith("classdiagram")) return false;
+            return true;
+          }).join("\n");
+        }
+      }
+
       // ── Strip invalid LLM-hallucinated node attribute bags ────────────────
       // e.g. web_app["🌐 Web Application"]{class="ui", shape="round"}
       // The `{` is parsed as DIAMOND_START by Mermaid and crashes the lexer.
@@ -1706,6 +1688,13 @@ export default function Home() {
       // ── Targeted pre-pass: handle the specific recurring crash pattern ──────
       s = s.replace(/([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi, (m, a, b) => a + "\n" + b);
       s = s.replace(/(direction\s+(?:TD|LR|TB|BT|RL))([^\n\s])/gi, (m, a, b) => a + "\n" + b);
+      // ── Extra: split node definitions squashed after direction TD ────────────
+      // Handles: direction TDnodeId["label"] and direction TDnodeId("label")
+      // The parser sees NODE_STRING when a node immediately follows direction TD.
+      s = s.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([a-zA-Z][a-zA-Z0-9_]*\s*[\[({])/gi, (m, a, b) => a + "\n" + b);
+      // ── Extra: split subgraph label-close bracket followed by direction ──────
+      // Handles: subgraph id ["label"]direction TD
+      s = s.replace(/([\]"'])\s*(direction\s+(?:TD|LR|TB|BT|RL))/gi, (m, a, b) => a + "\n" + b);
       const DIR_KEYWORDS = [
         "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
         "ContainerDb_Ext", "ContainerQueue_Ext", "System_Boundary", "Container_Boundary",
@@ -1765,49 +1754,38 @@ export default function Home() {
     // Always run applyPatterns one more time — idempotent if already clean
     let guardedCode = applyPatterns(applyPatterns(finalCode));
 
-    // ── Stage 4: Line-by-line surgical repair ────────────────────────────────
-    // If the nuclear pass still misses a squash (e.g. `direction TD` embedded
-    // mid-line with surrounding text), split each line that contains multiple
-    // Mermaid structural keywords into separate lines.
-    guardedCode = (() => {
-      const SPLIT_KEYWORDS = [
-        "direction\\s+(?:TD|LR|TB|BT|RL)",
-        "Person_Ext\\s*\\(", "System_Ext\\s*\\(", "Container_Ext\\s*\\(",
-        "Component_Ext\\s*\\(", "ContainerDb_Ext\\s*\\(", "ContainerQueue_Ext\\s*\\(",
-        "System_Boundary\\s*\\(", "Container_Boundary\\s*\\(",
-        "ContainerDb\\s*\\(", "ContainerQueue\\s*\\(",
-        "Rel_Back\\s*\\(", "Rel_Neighbor\\s*\\(",
-        "Rel_Up\\s*\\(", "Rel_Down\\s*\\(", "Rel_Left\\s*\\(", "Rel_Right\\s*\\(",
-        "Container\\s*\\(", "Component\\s*\\(", "Boundary\\s*\\(",
-        "Person\\s*\\(", "System\\s*\\(", "Rel\\s*\\(",
-        "LAYOUT_WITH_LEGEND", "C4Context", "C4Container", "C4Component",
-        "flowchart\\s", "sequenceDiagram", "erDiagram", "classDiagram",
-        "subgraph\\s", "classDef\\s", "participant\\s", "title\\s",
-      ];
-      const kwAlt = SPLIT_KEYWORDS.join("|");
+    // ── Stage 4: Guaranteed line-by-line direction split ─────────────────────
+    // This pass is UNCONDITIONAL — it runs on every line regardless of what
+    // previous passes did. It directly scans each line for the `direction TD/LR/...`
+    // pattern and splits the line at EVERY occurrence, no matter what surrounds it.
+    // This is the absolute last resort — it cannot be defeated by quote-aware logic,
+    // label-quoting passes, or any other pre-processing.
+    guardedCode = guardedCode.split("\n").flatMap(line => {
+      // Comment lines and lines without `direction` are returned unchanged.
+      if (line.trim().startsWith("%%")) return [line];
+      if (!/direction\s+(?:TD|LR|TB|BT|RL)/i.test(line)) return [line];
 
-      return guardedCode.split("\n").map(line => {
-        // Skip comment lines — they are single-statement by definition
-        if (line.trim().startsWith("%%")) return line;
-        // Count keyword hits outside of quoted strings
-        const outsideQuotes = line.split('"').filter((_, i) => i % 2 === 0).join(" ");
-        const hits = (outsideQuotes.match(new RegExp(kwAlt, "gi")) || []).length;
-        if (hits <= 1) return line; // already one statement per line — nothing to do
+      // The line contains `direction` — check if it's already isolated
+      // (i.e. `direction` is the only meaningful token on the line).
+      const stripped = line.trim();
+      if (/^direction\s+(?:TD|LR|TB|BT|RL)\s*$/i.test(stripped)) return [line];
 
-        // More than one keyword on this line: split at each keyword boundary.
-        // Insert \n before any keyword that is immediately preceded by a non-newline
-        // character. Works on the full line (not quote-aware) because structural
-        // keywords must never appear inside node labels at this stage.
-        let repaired = line;
-        for (const kw of SPLIT_KEYWORDS) {
-          repaired = repaired.replace(
-            new RegExp(`([^\\n])(${kw})`, "gi"),
-            (_, before, keyword) => `${before}\n${keyword}`
-          );
-        }
-        return repaired;
-      }).join("\n");
-    })();
+      // The line has `direction TD/LR/...` surrounded by other content.
+      // Split it into up to 3 parts: before / direction / after.
+      const DIR_RE = /(.*?)\s*(direction\s+(?:TD|LR|TB|BT|RL))\s*(.*)/i;
+      const match = line.match(DIR_RE);
+      if (!match) return [line];
+
+      const before = match[1]?.trim() ?? "";
+      const dir    = match[2]?.trim() ?? "";
+      const after  = match[3]?.trim() ?? "";
+
+      const parts: string[] = [];
+      if (before) parts.push(before);
+      parts.push(dir);
+      if (after) parts.push(after);
+      return parts;
+    }).join("\n");
     // ── END Stage 4 ──────────────────────────────────────────────────────────
 
     const m = (window as any).mermaid;
@@ -1999,120 +1977,48 @@ export default function Home() {
     setDrawioStatus("loading");
     setDrawioError(null);
 
-    const NON_FLOWCHART_KINDS = new Set([
-      "er", "sequence", "class", "state",
-      "gantt", "timeline", "mindmap", "quadrant",
-      "c4context", "c4container", "c4component",
-    ]);
-    const diagramKind = (lastBlueprint?.diagramKind || "flowchart").toLowerCase();
-    const needsSvgEmbed = NON_FLOWCHART_KINDS.has(diagramKind);
+    const loadXml = (xml: string) => {
+      drawioXmlRef.current = xml;
+      setDrawioXML(xml);
+      setDrawioStatus("loaded");
+      if (drawioReady) {
+        iframeRef.current?.contentWindow?.postMessage(
+          JSON.stringify({ action: "load", xml, autosave: 1 }),
+          "*"
+        );
+      }
+    };
 
     try {
-      if (compilerMethod === "visual") {
-        if (canvasSvg) {
-          const xml = compileSvgToDrawioXml(canvasSvg);
-          setDrawioXML(xml);
-          setDrawioStatus("loaded");
-          if (drawioReady) {
-            iframeRef.current?.contentWindow?.postMessage(
-              JSON.stringify({ action: "load", xml, autosave: 1 }),
-              "*"
-            );
-          }
-          triggerToast("Visual parity compiled successfully! ✓", false);
-        } else if (mermaidCode) {
-          const renderedSvg = await renderMermaidMarkup(mermaidCode);
-          if (renderedSvg) {
-            const xml = compileSvgToDrawioXml(renderedSvg);
-            setDrawioXML(xml);
-            setDrawioStatus("loaded");
-            if (drawioReady) {
-              iframeRef.current?.contentWindow?.postMessage(
-                JSON.stringify({ action: "load", xml, autosave: 1 }),
-                "*"
-              );
-            }
-            triggerToast("Visual parity compiled successfully! ✓", false);
-          } else {
-            throw new Error("Could not render Mermaid SVG for Visual parity compilation.");
-          }
-        } else {
-          throw new Error("SVG content not found for Visual parity compiler.");
-        }
-      } else if (compilerMethod === "deterministic") {
-        if (needsSvgEmbed) {
-          // Non-flowchart types: embed the SVG instead of using the geometric compiler
-          const svgSource = canvasSvg || (mermaidCode ? await renderMermaidMarkup(mermaidCode) : null);
-          if (svgSource) {
-            const xml = compileSvgToDrawioXml(svgSource as string);
-            setDrawioXML(xml);
-            setDrawioStatus("loaded");
-            if (drawioReady) {
-              iframeRef.current?.contentWindow?.postMessage(
-                JSON.stringify({ action: "load", xml, autosave: 1 }),
-                "*"
-              );
-            }
-            triggerToast("Diagram loaded into editor successfully! ✓", false);
-          } else {
-            throw new Error("No rendered SVG available to embed.");
-          }
-        } else {
-          const xml = compileBlueprintToDrawio(lastBlueprint, canvasSvg || undefined, resolvedLogos);
-          setDrawioXML(xml);
-          setDrawioStatus("loaded");
-          if (drawioReady) {
-            iframeRef.current?.contentWindow?.postMessage(
-              JSON.stringify({ action: "load", xml, autosave: 1 }),
-              "*"
-            );
-          }
-          triggerToast("Selectable elements re-compiled successfully! ✓", false);
-        }
+      if (compilerMethod === "visual" || compilerMethod === "deterministic") {
+        const xml = compileBlueprintToDrawio(lastBlueprint, canvasSvg || undefined, resolvedLogos);
+        loadXml(xml);
+        triggerToast("Diagram re-compiled successfully! ✓", false);
       } else {
-        if (needsSvgEmbed && (canvasSvg || mermaidCode)) {
-          // Non-flowchart: prefer SVG embed over a Gemini server round-trip
-          const svgSource = canvasSvg || (mermaidCode ? await renderMermaidMarkup(mermaidCode) : null);
-          if (svgSource) {
-            const xml = compileSvgToDrawioXml(svgSource as string);
-            setDrawioXML(xml);
-            setDrawioStatus("loaded");
-            if (drawioReady) {
-              iframeRef.current?.contentWindow?.postMessage(
-                JSON.stringify({ action: "load", xml, autosave: 1 }),
-                "*"
-              );
-            }
-            triggerToast("Diagram loaded into editor successfully! ✓", false);
-          } else {
-            throw new Error("No rendered SVG available to embed.");
-          }
-        } else {
-          const res = await fetch("/api/generate", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ stage: 3, blueprint: lastBlueprint })
-          });
-          if (!res.ok) {
-            let errMsg = "Retry compilation failed.";
-            try { const j = await res.json(); errMsg = j.error || errMsg; } catch { errMsg = `Server error ${res.status}`; }
-            throw new Error(errMsg);
-          }
-          const { xml } = await res.json();
-          setDrawioXML(xml);
-          setDrawioStatus("loaded");
-          if (drawioReady) {
-            iframeRef.current?.contentWindow?.postMessage(
-              JSON.stringify({ action: "load", xml, autosave: 1 }),
-              "*"
-            );
-          }
-          triggerToast("Selectable elements re-compiled successfully! ✓", false);
+        const res = await fetch("/api/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ stage: 3, blueprint: lastBlueprint })
+        });
+        if (!res.ok) {
+          let errMsg = "Retry compilation failed.";
+          try { const j = await res.json(); errMsg = j.error || errMsg; } catch { errMsg = `Server error ${res.status}`; }
+          throw new Error(errMsg);
         }
+        const { xml } = await res.json();
+        loadXml(xml);
+        triggerToast("Selectable elements re-compiled successfully! ✓", false);
       }
     } catch (err: any) {
-      setDrawioStatus("error");
-      setDrawioError(err.message || "Failed on retry compilation.");
+      // If server failed, try local compile as last resort
+      try {
+        const xml = compileBlueprintToDrawio(lastBlueprint, canvasSvg || undefined, resolvedLogos);
+        loadXml(xml);
+        triggerToast("Diagram re-compiled (local fallback) successfully! ✓", false);
+      } catch {
+        setDrawioStatus("error");
+        setDrawioError(err.message || "Failed on retry compilation.");
+      }
     }
   };
 
@@ -2405,7 +2311,26 @@ export default function Home() {
     triggerToast("Copied to clipboard!", false);
   };
 
-  const getDiagramKindBadge = (code: string) => {
+  const getDiagramKindBadge = (code: string, blueprintKind?: string) => {
+    const kind = blueprintKind?.toLowerCase();
+    if (kind === "bpmn") return "BPMN Process Flow";
+    if (kind === "archimate") return "ArchiMate View";
+    if (kind === "dfd") return "Data Flow Diagram";
+    if (kind === "vsm") return "Value Stream Map";
+    if (kind === "capability_map") return "Capability Map";
+    if (kind === "network_topology") return "Network Topology";
+    if (kind === "deployment") return "Deployment Diagram";
+    if (kind === "component") return "Component Diagram";
+    if (kind === "use_case") return "Use Case Diagram";
+    if (kind === "activity") return "Activity Diagram";
+    if (kind === "communication") return "Communication Diagram";
+    if (kind === "package") return "Package Diagram";
+    if (kind === "object") return "Object Diagram";
+    if (kind === "timing") return "Timing Diagram";
+    if (kind === "interaction_overview") return "Interaction Overview";
+    if (kind === "it_roadmap") return "IT Roadmap";
+    if (kind === "service_blueprint") return "Service Blueprint";
+    if (kind === "swimlane") return "Swimlane Flow";
     const firstLine = code.trim().toLowerCase();
     if (firstLine.startsWith("flowchart") || firstLine.startsWith("graph")) return "Flowchart / Schema";
     if (firstLine.startsWith("sequencediagram")) return "Sequence Diagram";
@@ -2712,25 +2637,45 @@ export default function Home() {
                 className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2.5 text-xs text-[#F0F0F0] focus:outline-none focus:border-[#d4ff00] transition-colors cursor-pointer appearance-none"
               >
                 <option value="auto" className="bg-[#0A0A0A]">🌟 Auto-detect optimal model</option>
-                <optgroup label="Enterprise Core Systems" className="bg-[#0A0A0A]">
+                <optgroup label="EA / Architecture Views" className="bg-[#0A0A0A]">
+                  <option value="archimate">ArchiMate View</option>
+                  <option value="capability_map">Capability Map</option>
+                  <option value="deployment">UML Deployment Diagram</option>
+                  <option value="network_topology">Network Topology</option>
                   <option value="c4context">C4 Context Diagram</option>
                   <option value="c4container">C4 Container Map</option>
                   <option value="c4component">C4 Component Structure</option>
                 </optgroup>
-                <optgroup label="Processes & Workflows" className="bg-[#0A0A0A]">
-                  <option value="flowchart">Standard Architecture Flowchart</option>
-                  <option value="sequence">Interactive Sequence flow</option>
-                  <option value="state">Unified State machine v2</option>
+                <optgroup label="UML Diagrams" className="bg-[#0A0A0A]">
+                  <option value="class">UML Class Diagram</option>
+                  <option value="component">UML Component Diagram</option>
+                  <option value="use_case">UML Use Case Diagram</option>
+                  <option value="activity">UML Activity Diagram</option>
+                  <option value="state">UML State Machine</option>
+                  <option value="communication">UML Communication Diagram</option>
+                  <option value="package">UML Package Diagram</option>
+                  <option value="object">UML Object Diagram</option>
+                  <option value="timing">UML Timing Diagram</option>
+                  <option value="interaction_overview">UML Interaction Overview</option>
+                  <option value="sequence">UML Sequence Diagram</option>
                 </optgroup>
-                <optgroup label="Entity Structure" className="bg-[#0A0A0A]">
-                  <option value="er">Physical Entity Relation (ERD)</option>
-                  <option value="class">Logical UML Class Schema</option>
+                <optgroup label="Process &amp; Workflow" className="bg-[#0A0A0A]">
+                  <option value="bpmn">BPMN Process Flow</option>
+                  <option value="swimlane">Swimlane Flowchart</option>
+                  <option value="dfd">Data Flow Diagram (DFD)</option>
+                  <option value="vsm">Value Stream Map</option>
+                  <option value="service_blueprint">Service Blueprint</option>
+                  <option value="flowchart">Architecture Flowchart</option>
                 </optgroup>
-                <optgroup label="Strategic Planning & Alignment" className="bg-[#0A0A0A]">
-                  <option value="gantt">Project Gantt chart</option>
-                  <option value="timeline">History / Chronology Roadmap</option>
-                  <option value="mindmap">Tree-structured Brainstorm</option>
-                  <option value="quadrant">Priority Matrix (2x2 Quadrant)</option>
+                <optgroup label="Planning &amp; Strategy" className="bg-[#0A0A0A]">
+                  <option value="it_roadmap">IT / Product Roadmap</option>
+                  <option value="gantt">Gantt Chart</option>
+                  <option value="timeline">Timeline / Roadmap</option>
+                  <option value="mindmap">Mind Map</option>
+                  <option value="quadrant">Priority Quadrant</option>
+                </optgroup>
+                <optgroup label="Data &amp; Entity" className="bg-[#0A0A0A]">
+                  <option value="er">ER Diagram (Database Schema)</option>
                 </optgroup>
               </select>
               <div className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-[#999999]">
