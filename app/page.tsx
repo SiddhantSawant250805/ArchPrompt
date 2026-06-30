@@ -133,7 +133,11 @@ function overlayLogosOnMermaidSvg(
       bg.setAttribute("opacity", "0.9");
 
       const img = document.createElementNS("http://www.w3.org/2000/svg", "image");
-      img.setAttribute("href", logo.path);
+      // Use absolute URL so the SVG image element can load the logo
+      const logoHref = logo.path.startsWith("http")
+        ? logo.path
+        : window.location.origin + logo.path;
+      img.setAttribute("href", logoHref);
       img.setAttribute("x", String(bx + 2));
       img.setAttribute("y", String(by + 2));
       img.setAttribute("width", String(BADGE_SIZE - 4));
@@ -1346,6 +1350,17 @@ export default function Home() {
     // Normalize line endings
     let clean = code.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
+    // ── STRIP INVALID NODE ATTRIBUTE BAGS ────────────────────────────────────
+    // Must run first — before any other pass — because the LLM sometimes emits
+    // non-existent Mermaid syntax like:
+    //   web_app["🌐 Web Application"]{class="ui", shape="round"}
+    // Mermaid's lexer treats `{` as DIAMOND_START and hard-crashes with:
+    //   "got 'DIAMOND_START'" parse error.
+    // These attribute bags are stripped entirely; correct class assignments
+    // are emitted as separate `class nodeId className` lines elsewhere.
+    clean = clean.replace(/\{[^{}]*(?:class|shape|style|fill|stroke)[^{}]*\}/gi, "");
+    // ── END STRIP INVALID NODE ATTRIBUTE BAGS ─────────────────────────────────
+
     // ── STEP 0: Direct keyword boundary injection ─────────────────────────────
     // Targeted pre-pass: handle the specific crash pattern first
     // "Xdirection TDKeyword(" — split at direction AND at any keyword following TD
@@ -1374,9 +1389,26 @@ export default function Home() {
         // Also split when a word char runs directly into this keyword with a `(`
         clean = clean.replace(new RegExp(`(\\w)(${kw}\\s*\\()`, "g"), "$1\n$2");
       }
+
+      // Step D: split squashed sequence diagram message lines.
+      // Pattern: a complete message line ending with a node ID immediately followed
+      // by another node ID starting a new arrow (e.g. "A ->> BkafkaB ->> C").
+      // Split before any word char that follows a word char with no space, when
+      // that position is immediately preceded by an arrow + node_id pattern.
+      // Handles: ->>, -->>, -.->> , ->>, -->
+      // e.g. "kafka_bus -.->> order_serviceborder_service ->>..." → split at "border_service"
+      // Strategy: split when a sequence arrow expression ends and a new word starts without newline
+      // Match: (word)(space)(arrow)(space)(word)(word_no_space_start)
+      clean = clean.replace(
+        /(\w[\w_]*)(\s+(?:-\.?->>?|-->>?|->)\s+\w[\w_]*)(\w[\w_]*\s+(?:-\.?->>?|-->>?|->))/g,
+        (m, pre, arrow_target, next) => `${pre}${arrow_target}\n${next}`
+      );
     }
 
-    const KEYWORD_PATTERNS: RegExp[] = [
+    // IMPORTANT: Regex instances with /g flag maintain lastIndex state across reuse.
+    // This factory MUST be called inside each pass to produce fresh instances so
+    // lastIndex is always 0 at the start of each pass — preventing missed matches.
+    const makeKeywordPatterns = (): RegExp[] => [
       /([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi,
       /([^\n])(%%\{)/g,
       /([^\n])(C4Container\b)/g,
@@ -1420,11 +1452,17 @@ export default function Home() {
       /([^\n])(actor\s)/g,
       /([^\n])(title\s)/g,
       /([^\n])(section\s)/g,
+      // Sequence diagram: split squashed message lines
+      // e.g. "kafka_bus -.->> order_serviceborder_service ->>" → split before second actor
+      /(\w[\w_]*\s+(?:-\.?->>?|-->>?|->)\s+\w[\w_]*)(\w[\w_]*\s+(?:-\.?->>?|-->>?|->))/g,
     ];
 
     for (let pass = 0; pass < 30; pass++) {
       const prev = clean;
-      for (const pattern of KEYWORD_PATTERNS) {
+      // Fresh regex instances every pass — /g flag reuse causes stale lastIndex
+      // which silently skips matches in subsequent passes (the root cause of the
+      // recurring "Platformdirection TDContain" lexical crash).
+      for (const pattern of makeKeywordPatterns()) {
         clean = clean.replace(pattern, "$1\n$2");
       }
       if (clean === prev) break;
@@ -1468,6 +1506,31 @@ export default function Home() {
           ? `${id}["${escapeLabel(label)}"]`
           : match
     );
+
+    // ── STRIP INVALID NODE ATTRIBUTE BAGS ────────────────────────────────────
+    // The LLM sometimes emits non-existent Mermaid syntax like:
+    //   web_app["🌐 Web Application"]{class="ui", shape="round"}
+    // Mermaid's lexer sees `{` as DIAMOND_START and crashes immediately.
+    // Strip these attribute bags; class assignments are handled via separate
+    // `class nodeId className` statements that the LLM generates elsewhere.
+    clean = clean.replace(/(\{[^{}]*(?:class|shape|style|fill|stroke)[^{}]*\})/gi, "");
+    // ── END STRIP INVALID NODE ATTRIBUTE BAGS ─────────────────────────────────
+
+    // ── NUCLEAR DIRECTION PASS (matches route.ts) ─────────────────────────────
+    // Last-resort guarantee: any line that still contains `direction TD/LR/...`
+    // sandwiched between other text is forcibly split. This catches squashes that
+    // survive the quote-aware loop (e.g. direction inside a quoted subgraph label).
+    clean = clean.replace(
+      /([^\n]+?)\s*(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n]+)/gi,
+      (_, before, dir, after) => {
+        const parts: string[] = [];
+        if (before.trim()) parts.push(before.trim());
+        parts.push(dir.trim());
+        if (after.trim()) parts.push(after.trim());
+        return parts.join("\n");
+      }
+    );
+    // ── END NUCLEAR DIRECTION PASS ────────────────────────────────────────────
 
     // Ensure a valid header exists
     clean = ensureHeader(clean);
@@ -1572,10 +1635,17 @@ export default function Home() {
       /([^\n])(subgraph\s)/g, /([^\n])(classDef\s)/g,
       /([^\n])(participant\s)/g, /([^\n])(actor\s)/g,
       /([^\n])(title\s)/g, /([^\n])(section\s)/g,
+      // Sequence diagram: split squashed message lines
+      /(\w[\w_]*\s+(?:-\.?->>?|-->>?|->)\s+\w[\w_]*)(\w[\w_]*\s+(?:-\.?->>?|-->>?|->))/g,
     ];
 
     const applyPatterns = (input: string): string => {
       let s = input;
+
+      // ── Strip invalid LLM-hallucinated node attribute bags ────────────────
+      // e.g. web_app["🌐 Web Application"]{class="ui", shape="round"}
+      // The `{` is parsed as DIAMOND_START by Mermaid and crashes the lexer.
+      s = s.replace(/(\{[^{}]*(?:class|shape|style|fill|stroke)[^{}]*\})/gi, "");
 
       // ── Targeted pre-pass: handle the specific recurring crash pattern ──────
       s = s.replace(/([^\n])(direction\s+(?:TD|LR|TB|BT|RL))/gi, (m, a, b) => a + "\n" + b);
@@ -1595,6 +1665,13 @@ export default function Home() {
         s = s.replace(new RegExp(`(\\w)(${kw}\\s*\\()`, "g"), (m, a, b) => a + "\n" + b);
       }
 
+      // Split squashed sequence diagram message lines
+      // e.g. "A -.->> BkafkaB -.->> C" → "A -.->> B\nkafkaB -.->> C"
+      s = s.replace(
+        /(\w[\w_]*\s+(?:-\.?->>?|-->>?|->)\s+\w[\w_]*)(\w[\w_]*\s+(?:-\.?->>?|-->>?|->))/g,
+        (m, a, b) => a + "\n" + b
+      );
+
       // ── General pattern loop — fresh regex instances each pass ──────────────
       for (let pass = 0; pass < 30; pass++) {
         const prev = s;
@@ -1604,6 +1681,18 @@ export default function Home() {
       }
       s = s.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n])/gi, (m, a, b) => a + "\n" + b);
       s = s.replace(/([^\n])\b(end)\b(\s*\n)/gi, (m, a, b, c) => a + "\nend\n");
+      // ── NUCLEAR DIRECTION PASS (last resort before m.render) ─────────────────
+      // Forcibly isolates any `direction TD/LR/...` still sandwiched on a line.
+      s = s.replace(
+        /([^\n]+?)\s*(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n]+)/gi,
+        (_, before, dir, after) => {
+          const parts: string[] = [];
+          if (before.trim()) parts.push(before.trim());
+          parts.push(dir.trim());
+          if (after.trim()) parts.push(after.trim());
+          return parts.join("\n");
+        }
+      );
       s = s.replace(/\n{3,}/g, "\n\n");
       return ensureHeader(s.trim());
     };
@@ -1618,7 +1707,52 @@ export default function Home() {
       console.warn("[validateMermaidStatements] Squash detected, applying extra sanitize pass:", validation.errorMsg);
     }
     // Always run applyPatterns one more time — idempotent if already clean
-    const guardedCode = applyPatterns(applyPatterns(finalCode));
+    let guardedCode = applyPatterns(applyPatterns(finalCode));
+
+    // ── Stage 4: Line-by-line surgical repair ────────────────────────────────
+    // If the nuclear pass still misses a squash (e.g. `direction TD` embedded
+    // mid-line with surrounding text), split each line that contains multiple
+    // Mermaid structural keywords into separate lines.
+    guardedCode = (() => {
+      const SPLIT_KEYWORDS = [
+        "direction\\s+(?:TD|LR|TB|BT|RL)",
+        "Person_Ext\\s*\\(", "System_Ext\\s*\\(", "Container_Ext\\s*\\(",
+        "Component_Ext\\s*\\(", "ContainerDb_Ext\\s*\\(", "ContainerQueue_Ext\\s*\\(",
+        "System_Boundary\\s*\\(", "Container_Boundary\\s*\\(",
+        "ContainerDb\\s*\\(", "ContainerQueue\\s*\\(",
+        "Rel_Back\\s*\\(", "Rel_Neighbor\\s*\\(",
+        "Rel_Up\\s*\\(", "Rel_Down\\s*\\(", "Rel_Left\\s*\\(", "Rel_Right\\s*\\(",
+        "Container\\s*\\(", "Component\\s*\\(", "Boundary\\s*\\(",
+        "Person\\s*\\(", "System\\s*\\(", "Rel\\s*\\(",
+        "LAYOUT_WITH_LEGEND", "C4Context", "C4Container", "C4Component",
+        "flowchart\\s", "sequenceDiagram", "erDiagram", "classDiagram",
+        "subgraph\\s", "classDef\\s", "participant\\s", "title\\s",
+      ];
+      const kwAlt = SPLIT_KEYWORDS.join("|");
+
+      return guardedCode.split("\n").map(line => {
+        // Skip comment lines — they are single-statement by definition
+        if (line.trim().startsWith("%%")) return line;
+        // Count keyword hits outside of quoted strings
+        const outsideQuotes = line.split('"').filter((_, i) => i % 2 === 0).join(" ");
+        const hits = (outsideQuotes.match(new RegExp(kwAlt, "gi")) || []).length;
+        if (hits <= 1) return line; // already one statement per line — nothing to do
+
+        // More than one keyword on this line: split at each keyword boundary.
+        // Insert \n before any keyword that is immediately preceded by a non-newline
+        // character. Works on the full line (not quote-aware) because structural
+        // keywords must never appear inside node labels at this stage.
+        let repaired = line;
+        for (const kw of SPLIT_KEYWORDS) {
+          repaired = repaired.replace(
+            new RegExp(`([^\\n])(${kw})`, "gi"),
+            (_, before, keyword) => `${before}\n${keyword}`
+          );
+        }
+        return repaired;
+      }).join("\n");
+    })();
+    // ── END Stage 4 ──────────────────────────────────────────────────────────
 
     const m = (window as any).mermaid;
     const renderId = "mermaid-render-" + Math.random().toString(36).substring(2, 9);

@@ -52,7 +52,11 @@ export function compileBlueprintToDrawio(
     }
 
     if (logoPath) {
-      styleParts.push(`image;image=${logoPath}`, "imageAlign=left", "imageVerticalAlign=top", "imageWidth=20", "imageHeight=20");
+      // Use full absolute URL so draw.io iframe (embed.diagrams.net) can fetch it.
+      // logoPath is already absolute (starts with /), so prepend the origin if needed.
+      const fullLogoUrl = logoPath.startsWith("http") ? logoPath
+        : (typeof window !== "undefined" ? window.location.origin : "") + logoPath;
+      styleParts.push(`image;image=${fullLogoUrl}`, "imageAlign=left", "imageVerticalAlign=top", "imageWidth=20", "imageHeight=20");
     }
 
     return styleParts.join(";");

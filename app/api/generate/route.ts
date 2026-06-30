@@ -327,6 +327,17 @@ function sanitizeContent(text: string): string {
   // Normalize line endings
   clean = clean.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
+  // ── STRIP INVALID NODE ATTRIBUTE BAGS ────────────────────────────────────
+  // Must run before all other passes. The LLM sometimes emits non-existent
+  // Mermaid syntax like:
+  //   web_app["🌐 Web Application"]{class="ui", shape="round"}
+  // Mermaid's lexer treats `{` as DIAMOND_START and hard-crashes with:
+  //   "got 'DIAMOND_START'" parse error.
+  // Strip these bags entirely — correct class assignments are emitted as
+  // separate `class nodeId className` lines by the LLM elsewhere.
+  clean = clean.replace(/\{[^{}]*(?:class|shape|style|fill|stroke)[^{}]*\}/gi, "");
+  // ── END STRIP INVALID NODE ATTRIBUTE BAGS ─────────────────────────────────
+
   // ── STEP 0: Direct regex keyword injection ────────────────────────────────
   // Targeted pre-pass first — handles the specific crash pattern
   // "Xdirection TDKeyword(" before the general loop runs.
@@ -380,6 +391,8 @@ function sanitizeContent(text: string): string {
     /([^\n])(subgraph\s)/g, /([^\n])(classDef\s)/g,
     /([^\n])(participant\s)/g, /([^\n])(actor\s)/g,
     /([^\n])(title\s)/g, /([^\n])(section\s)/g,
+    // Sequence diagram: split squashed message lines
+    /(\w[\w_]*\s+(?:-\.?->>?|-->>?|->)\s+\w[\w_]*)(\w[\w_]*\s+(?:-\.?->>?|-->>?|->))/g,
   ];
   for (let pass = 0; pass < 30; pass++) {
     const prev = clean;
@@ -554,6 +567,16 @@ function sanitizeContent(text: string): string {
 
   // LAYOUT_WITH_LEGEND always on its own line
   clean = clean.replace(/\s*LAYOUT_WITH_LEGEND(\(\))?\s*/gi, "\nLAYOUT_WITH_LEGEND()\n");
+
+  // ── STRIP INVALID NODE ATTRIBUTE BAGS ────────────────────────────────────
+  // The LLM sometimes emits non-existent Mermaid syntax like:
+  //   web_app["🌐 Web Application"]{class="ui", shape="round"}
+  // Mermaid's lexer sees `{` as DIAMOND_START and crashes immediately.
+  // Strip these attribute bags entirely; class assignments are handled via
+  // `class nodeId className` statements that the LLM already generates separately.
+  clean = clean.replace(/(\{[^{}]*(?:class|shape|style|fill|stroke)[^{}]*\})/gi, "");
+  // ── END STRIP INVALID NODE ATTRIBUTE BAGS ─────────────────────────────────
+
   // ── NUCLEAR DIRECTION PASS: ensure `direction TD/LR/...` is always isolated on its own line
   clean = clean.replace(/([^\n]+?)\s*(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n]+)/gi, (_, before, dir, after) => {
     const parts: string[] = [];
@@ -565,6 +588,60 @@ function sanitizeContent(text: string): string {
   // Collapse excessive blank lines
   clean = clean.replace(/\n{3,}/g, "\n\n");
   return clean.trim();
+}
+
+/**
+ * repairJson — makes a best-effort attempt to fix common LLM JSON slip-ups
+ * before handing to JSON.parse.
+ *
+ * Handles:
+ *  1. Trailing commas before } or ]  (e.g. {"a":1,}  or [1,2,])
+ *  2. Single-quoted strings          (e.g. {'key': 'value'})
+ *  3. Unquoted keys                  (e.g. {key: "value"})
+ *  4. Comments                       (// ... or /* ... *\/)
+ *  5. Ellipsis placeholders          (e.g. "edges": [...])
+ *  6. Extra leading/trailing text    (extract the outermost { ... } block)
+ *
+ * Returns the repaired string. Throws if no valid JSON can be extracted.
+ */
+function repairJson(raw: string): string {
+  let s = raw.trim();
+
+  // 1. Strip markdown fences (```json ... ```)
+  s = s.replace(/^```[a-zA-Z-]*\s*/gm, "").replace(/\s*```$/gm, "").trim();
+
+  // 2. Extract the outermost JSON object — handles preamble/postamble text
+  const firstBrace = s.indexOf("{");
+  const lastBrace = s.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    s = s.slice(firstBrace, lastBrace + 1);
+  }
+
+  // 3. Strip JS-style comments (// line and /* block */)
+  s = s.replace(/\/\/[^\n]*/g, "");
+  s = s.replace(/\/\*[\s\S]*?\*\//g, "");
+
+  // 4. Strip trailing commas before } or ] (the most common LLM mistake)
+  //    Run multiple times until idempotent to handle nested structures.
+  for (let i = 0; i < 10; i++) {
+    const prev = s;
+    s = s.replace(/,\s*([}\]])/g, "$1");
+    if (s === prev) break;
+  }
+
+  // 5. Replace single-quoted strings with double-quoted
+  //    Only fires when a single-quoted value isn't already inside double quotes.
+  s = s.replace(/'([^'\\]*(\\.[^'\\]*)*)'/g, (_, inner) => `"${inner}"`);
+
+  // 6. Quote unquoted keys:  { key: "value" }  →  { "key": "value" }
+  s = s.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3');
+
+  // 7. Remove ellipsis placeholder entries that break parse
+  //    e.g.  "edges": [ ... ]  or  "edges": [...]
+  s = s.replace(/:\s*\[\s*\.\.\.\s*\]/g, ": []");
+  s = s.replace(/:\s*\{\s*\.\.\.\s*\}/g, ": {}");
+
+  return s;
 }
 
 // Zentrale generator routine with fallback
@@ -736,10 +813,15 @@ export async function POST(req: NextRequest) {
       const cleanJson = sanitizeContent(text);
       let parsed: any;
       try {
-        parsed = JSON.parse(cleanJson);
+        parsed = JSON.parse(repairJson(cleanJson));
       } catch (parseErr: any) {
-        console.error("Stage 1: AI returned malformed JSON:", cleanJson.slice(0, 300));
-        return NextResponse.json({ error: `AI returned malformed JSON. Try again. (${parseErr.message})` }, { status: 500 });
+        // Last resort: try the raw text in case sanitizeContent mangled it
+        try {
+          parsed = JSON.parse(repairJson(text));
+        } catch {
+          console.error("Stage 1: AI returned malformed JSON:", cleanJson.slice(0, 300));
+          return NextResponse.json({ error: `AI returned malformed JSON. Try again. (${(parseErr as Error).message})` }, { status: 500 });
+        }
       }
 
       return NextResponse.json({ blueprint: parsed });
@@ -846,10 +928,15 @@ export async function POST(req: NextRequest) {
       const cleanJson = sanitizeContent(text);
       let parsed: any;
       try {
-        parsed = JSON.parse(cleanJson);
+        parsed = JSON.parse(repairJson(cleanJson));
       } catch (parseErr: any) {
-        console.error("Stage 4: AI returned malformed JSON:", cleanJson.slice(0, 300));
-        return NextResponse.json({ error: `AI returned malformed JSON. Try again. (${parseErr.message})` }, { status: 500 });
+        // Last resort: try the raw text in case sanitizeContent mangled it
+        try {
+          parsed = JSON.parse(repairJson(text));
+        } catch {
+          console.error("Stage 4: AI returned malformed JSON:", cleanJson.slice(0, 300));
+          return NextResponse.json({ error: `AI returned malformed JSON. Try again. (${(parseErr as Error).message})` }, { status: 500 });
+        }
       }
 
       return NextResponse.json({ blueprint: parsed });
