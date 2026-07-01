@@ -722,6 +722,16 @@ function sanitizeContent(text: string): string {
     clean = clean.replace(/([\]"'])\s*(direction\s+(?:TD|LR|TB|BT|RL))/gi, (m: string, a: string, b: string) => a + "\n" + b);
     // Split node definition squashed directly after direction TD
     clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([a-zA-Z][a-zA-Z0-9_]*\s*[\[({])/gi, (m: string, a: string, b: string) => a + "\n" + b);
+
+    // ── C4 DIAGRAM DECLARATION + DIRECTION SQUASH ──────────────────────────────
+    // Handle: "C4Containerdirection TD", "C4Contextdirection TD", "C4Componentdirection TD"
+    // These are the most common crash patterns for C4 diagrams.
+    clean = clean.replace(/\b(C4Context|C4Container|C4Component)(direction)/gi, "$1\n$2");
+    // Also split when direction value runs directly into C4 keywords:
+    // "direction TDBoundary", "direction TDPerson", "direction TDContainer"
+    clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*(Boundary|Person|System|Container|Component|Rel)\s*\(/gi, "$1\n$3(");
+    // ── END C4 DIAGRAM DECLARATION + DIRECTION SQUASH ────────────────────────
+
     for (const kw of DIR_KW) {
       clean = clean.replace(
         new RegExp(`(direction\\s+(?:TD|LR|TB|BT|RL))\\s*(${kw}\\b)`, "gi"),
@@ -917,6 +927,13 @@ function sanitizeContent(text: string): string {
   clean = clean.replace(new RegExp(`(${DIR})(_)`, "gi"), "$1\n$2");
   // Handle title followed by any word then direction — greedy match
   clean = clean.replace(new RegExp(`(title\\s+[^\\n]+)(direction)`, "gi"), "$1\n$2");
+
+  // ── C4 DIAGRAM DECLARATION + DIRECTION SQUASH (final safety net) ──────────────
+  // Handle "C4Containerdirection TD", "C4Contextdirection TD", etc.
+  clean = clean.replace(/\b(C4Context|C4Container|C4Component)(direction)/gi, "$1\n$2");
+  // Handle "direction TDBoundary(", "direction TDPerson(", etc.
+  clean = clean.replace(new RegExp(`(direction\\s+${DIR})(Boundary|Person|System|Container|Component|Rel)(\\\\s*\\\\()`, "gi"), "$1\n$2$3");
+  // ── END C4 DIAGRAM DECLARATION + DIRECTION SQUASH ────────────────────────────
 
   // 1. flowchart/graph + direction squashed against subgraph / end.
   //    Use explicit direction alternation instead of \w+ so "TD" isn't
