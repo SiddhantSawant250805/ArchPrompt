@@ -970,7 +970,7 @@ function sanitizeContent(text: string): string {
   // Handle "C4Containerdirection TD", "C4Contextdirection TD", etc.
   clean = clean.replace(/\b(C4Context|C4Container|C4Component)(direction)/gi, "$1\n$2");
   // Handle "direction TDBoundary(", "direction TDPerson(", etc.
-  clean = clean.replace(new RegExp(`(direction\\s+${DIR})(Boundary|Person|System|Container|Component|Rel)(\\\\s*\\\\()`, "gi"), "$1\n$2$3");
+  clean = clean.replace(new RegExp(`(direction\\s+${DIR})(Boundary|Person|System|Container|Component|Rel)\\s*\\(`, "gi"), "$1\n$2(");
   // ── END C4 DIAGRAM DECLARATION + DIRECTION SQUASH ────────────────────────────
 
   // 1. flowchart/graph + direction squashed against subgraph / end.

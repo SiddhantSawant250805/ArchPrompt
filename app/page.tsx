@@ -1693,7 +1693,7 @@ export default function Home() {
     // Handle "C4Containerdirection TD", "C4Contextdirection TD", etc.
     clean = clean.replace(/\b(C4Context|C4Container|C4Component)(direction)/gi, "$1\n$2");
     // Handle "direction TDBoundary(", "direction TDPerson(", etc.
-    clean = clean.replace(new RegExp(`(direction\\s+${DIR})(Boundary|Person|System|Container|Component|Rel)(\\s*\\()`, "gi"), "$1\n$2$3");
+    clean = clean.replace(new RegExp(`(direction\\s+${DIR})(Boundary|Person|System|Container|Component|Rel)\\s*\\(`, "gi"), "$1\n$2(");
     // ── END C4 DIAGRAM DECLARATION + DIRECTION SQUASH ────────────────────────────
 
     // ── Re-run B2/B3 direction splits AFTER the subgraph label pass ───────────
