@@ -1567,6 +1567,16 @@ export default function Home() {
       // Handles: direction TDnodeId["label"] or direction TDnodeId("label")
       // Mermaid crashes with 'got NODE_STRING' when a node follows direction on the same line.
       clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([a-zA-Z][a-zA-Z0-9_]*\s*[\[({])/gi, "$1\n$2");
+
+      // ── C4 DIAGRAM DECLARATION + DIRECTION SQUASH ──────────────────────────────
+      // Handle: "C4Containerdirection TD", "C4Contextdirection TD", "C4Componentdirection TD"
+      // These are the most common crash patterns for C4 diagrams.
+      clean = clean.replace(/\b(C4Context|C4Container|C4Component)(direction)/gi, "$1\n$2");
+      // Also split when direction value runs directly into C4 keywords:
+      // "direction TDBoundary(", "direction TDPerson(", "direction TDContainer("
+      clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*(Boundary|Person|System|Container|Component|Rel)\s*\(/gi, "$1\n$2(");
+      // ── END C4 DIAGRAM DECLARATION + DIRECTION SQUASH ────────────────────────
+
       // Step C: split each known keyword when it appears right after direction TD
       for (const kw of DIR_KW) {
         clean = clean.replace(
@@ -1678,6 +1688,13 @@ export default function Home() {
     clean = clean.replace(/\s*LAYOUT_WITH_LEGEND(\(\))?\s*/gi, "\nLAYOUT_WITH_LEGEND()\n");
     clean = clean.replace(/((?:graph|flowchart)\s+(?:TD|LR|RL|BT|TB))\s*(?!\n)/g, "$1\n");
     clean = clean.replace(/(subgraph\s+[^\n]+)\s*(?!\n)/g, "$1\n");
+
+    // ── C4 DIAGRAM DECLARATION + DIRECTION SQUASH (final safety net) ──────────────
+    // Handle "C4Containerdirection TD", "C4Contextdirection TD", etc.
+    clean = clean.replace(/\b(C4Context|C4Container|C4Component)(direction)/gi, "$1\n$2");
+    // Handle "direction TDBoundary(", "direction TDPerson(", etc.
+    clean = clean.replace(new RegExp(`(direction\\s+${DIR})(Boundary|Person|System|Container|Component|Rel)(\\s*\\()`, "gi"), "$1\n$2$3");
+    // ── END C4 DIAGRAM DECLARATION + DIRECTION SQUASH ────────────────────────────
 
     // ── Re-run B2/B3 direction splits AFTER the subgraph label pass ───────────
     // The `subgraph\s+[^\n]+` regex above matches the entire squashed line and
@@ -2018,6 +2035,16 @@ export default function Home() {
       // ── Extra: split subgraph label-close bracket followed by direction ──────
       // Handles: subgraph id ["label"]direction TD
       s = s.replace(/([\]"'])\s*(direction\s+(?:TD|LR|TB|BT|RL))/gi, (m, a, b) => a + "\n" + b);
+
+      // ── C4 DIAGRAM DECLARATION + DIRECTION SQUASH ──────────────────────────────
+      // Handle: "C4Containerdirection TD", "C4Contextdirection TD", "C4Componentdirection TD"
+      // These are the most common crash patterns for C4 diagrams.
+      s = s.replace(/\b(C4Context|C4Container|C4Component)(direction)/gi, "$1\n$2");
+      // Also split when direction value runs directly into C4 keywords:
+      // "direction TDBoundary(", "direction TDPerson(", "direction TDContainer("
+      s = s.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*(Boundary|Person|System|Container|Component|Rel)\s*\(/gi, "$1\n$2(");
+      // ── END C4 DIAGRAM DECLARATION + DIRECTION SQUASH ────────────────────────
+
       const DIR_KEYWORDS = [
         "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
         "ContainerDb_Ext", "ContainerQueue_Ext", "System_Boundary", "Container_Boundary",
