@@ -767,7 +767,7 @@ function sanitizeContent(text: string): string {
     clean = clean.replace(/\b(C4Context|C4Container|C4Component)(direction)/gi, "$1\n$2");
     // Also split when direction value runs directly into C4 keywords:
     // "direction TDBoundary", "direction TDPerson", "direction TDContainer"
-    clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*(Boundary|Person|System|Container|Component|Rel)\s*\(/gi, "$1\n$3(");
+    clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*(Boundary|Person|System|Container|Component|Rel)\s*\(/gi, "$1\n$2(");
     // ── END C4 DIAGRAM DECLARATION + DIRECTION SQUASH ────────────────────────
 
     for (const kw of DIR_KW) {
