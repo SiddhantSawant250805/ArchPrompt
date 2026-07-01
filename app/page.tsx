@@ -259,6 +259,8 @@ export default function Home() {
   const [drawioXML, setDrawioXML] = useState<string | null>(null);
   // Keep drawioXmlRef in sync — used by the init event handler to avoid stale closure
   useEffect(() => { drawioXmlRef.current = drawioXML; }, [drawioXML]);
+  // Keep drawioReadyRef in sync — used by the retry interval to read the latest ready state
+  useEffect(() => { drawioReadyRef.current = drawioReady; }, [drawioReady]);
   const [drawioFormatOpen, setDrawioFormatOpen] = useState(false);
 
   // GitHub Export State
@@ -349,6 +351,64 @@ export default function Home() {
   // Ref mirror of drawioXML so the draw.io `init` event handler always reads
   // the latest XML — the state-based closure would be stale at init time.
   const drawioXmlRef = useRef<string | null>(null);
+  // Ref mirror of drawioReady so the retry interval closure always reads the current value.
+  const drawioReadyRef = useRef<boolean>(false);
+  // Ref holding the pending retry interval ID for iframe XML delivery — cleared on success or unmount.
+  const drawioRetryRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Helper: load an XML string into the draw.io iframe and update state.
+  // embed.diagrams.net only accepts a "load" action AFTER it has emitted its
+  // own "init" event. Sending before init is silently ignored.
+  const loadDrawioXml = React.useCallback((xml: string | null) => {
+    if (!xml) {
+      drawioXmlRef.current = null;
+      setDrawioXML(null);
+      setDrawioStatus("empty");
+      if (drawioRetryRef.current) {
+        clearInterval(drawioRetryRef.current);
+        drawioRetryRef.current = null;
+      }
+      return;
+    }
+
+    drawioXmlRef.current = xml;
+    setDrawioXML(xml);
+
+    // Clear any previous retry loop before starting a new one.
+    if (drawioRetryRef.current) {
+      clearInterval(drawioRetryRef.current);
+      drawioRetryRef.current = null;
+    }
+
+    if (drawioReadyRef.current) {
+      // Iframe already initialised — send immediately.
+      iframeRef.current?.contentWindow?.postMessage(
+        JSON.stringify({ action: "load", xml, autosave: 1 }),
+        "*"
+      );
+      setDrawioStatus("loaded");
+      // Start a retry interval: if draw.io doesn't respond with a "load" event
+      // within 1.5 s (e.g. it was busy rendering), re-send the action.
+      // The interval is cleared in the message handler's "load" case.
+      let retryCount = 0;
+      drawioRetryRef.current = setInterval(() => {
+        retryCount++;
+        if (retryCount > 5) {
+          // Give up after 5 retries (~7.5 s total) to avoid infinite loops.
+          clearInterval(drawioRetryRef.current!);
+          drawioRetryRef.current = null;
+          return;
+        }
+        console.log(`[loadDrawioXml] Retry #${retryCount} — re-sending load action`);
+        iframeRef.current?.contentWindow?.postMessage(
+          JSON.stringify({ action: "load", xml: drawioXmlRef.current, autosave: 1 }),
+          "*"
+        );
+      }, 1500);
+    } else {
+      setDrawioStatus("loading");
+    }
+  }, []);
 
   // ----------------------------------------------------
   // ROBUST PURE CALLBACK UTILITIES
@@ -541,20 +601,7 @@ export default function Home() {
   }, [logoAssignTarget, resolvedLogos]);
   // ── END LOGO SYSTEM: auto-open popover on target change ──────────────────
 
-  // ── Safety net: when iframe becomes ready AFTER XML was already set ───────
-  // Handles the case where loadDrawioXml ran while drawioReady was still false
-  // (iframe not yet initialized), so the postMessage was skipped. Once the
-  // iframe fires `init` and drawioReady flips to true, this effect re-sends.
-  // The init handler also covers this, but the double-cover is harmless.
-  useEffect(() => {
-    if (drawioReady && drawioXmlRef.current) {
-      iframeRef.current?.contentWindow?.postMessage(
-        JSON.stringify({ action: "load", xml: drawioXmlRef.current, autosave: 1 }),
-        "*"
-      );
-    }
-  }, [drawioReady]);
-  // ── END safety net ────────────────────────────────────────────────────────
+  // (Retry-based loadDrawioXml + hardened init handler now cover this case — see compileBlueprintToDiagrams)
 
   useEffect(() => {
     // Set up message listener for draw.io iframe postMessages
@@ -567,21 +614,34 @@ export default function Home() {
         switch (msg.event) {
           case "init":
             setDrawioReady(true);
-            setDrawioStatus("loaded");
+            drawioReadyRef.current = true;
+            // Cancel any stale retry intervals — init is the authoritative delivery point.
+            if (drawioRetryRef.current) {
+              clearInterval(drawioRetryRef.current);
+              drawioRetryRef.current = null;
+            }
             // Use the ref (not the state closure) to read the latest XML.
-            // The state closure captured here is stale — setDrawioXML() may have
-            // been called after this effect registered, so drawioXML in closure
-            // is null even though the ref already has the fresh value.
+            // The state closure captured here can be stale if setDrawioXML() was
+            // called after this effect registered, but the ref is always current.
             if (drawioXmlRef.current) {
               iframeRef.current?.contentWindow?.postMessage(
                 JSON.stringify({ action: "load", xml: drawioXmlRef.current, autosave: 1 }),
                 "*"
               );
+              setDrawioStatus("loaded");
+            } else {
+              // No XML yet — show the empty state rather than a blank loaded canvas.
+              setDrawioStatus("empty");
             }
             break;
 
           case "load":
             setDrawioStatus("loaded");
+            // Draw.io confirmed the diagram loaded — clear any pending retry interval.
+            if (drawioRetryRef.current) {
+              clearInterval(drawioRetryRef.current);
+              drawioRetryRef.current = null;
+            }
             break;
 
           case "save":
@@ -619,8 +679,15 @@ export default function Home() {
     window.addEventListener("message", handleDrawioMessage);
     return () => {
       window.removeEventListener("message", handleDrawioMessage);
+      if (drawioRetryRef.current) {
+        clearInterval(drawioRetryRef.current);
+        drawioRetryRef.current = null;
+      }
     };
-  }, [drawioXML, renderDrawioSVGInCanvas, triggerToast]);
+  // Intentionally omit drawioXML from deps — we read it via drawioXmlRef to avoid
+  // re-registering the listener (and missing events) on every XML state update.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderDrawioSVGInCanvas, triggerToast]);
 
   // ── REPO SYSTEM: Phase 8 ──
   useEffect(() => {
@@ -778,21 +845,6 @@ export default function Home() {
 
     // All diagram types now compile to native draw.io XML via compileBlueprintToDrawio.
 
-    // Helper: load an XML string into the draw.io iframe and update state.
-    // Also writes to drawioXmlRef immediately so the iframe `init` event handler
-    // can read the latest value even before React state has re-rendered.
-    const loadDrawioXml = (xml: string) => {
-      drawioXmlRef.current = xml;   // sync ref first — read by init handler
-      setDrawioXML(xml);
-      setDrawioStatus("loaded");
-      if (drawioReady) {
-        iframeRef.current?.contentWindow?.postMessage(
-          JSON.stringify({ action: "load", xml, autosave: 1 }),
-          "*"
-        );
-      }
-    };
-
     try {
       // --------------------------------------------------
       // STAGE 2: PARALLEL MERMAID COMPILATION
@@ -841,8 +893,15 @@ export default function Home() {
             drawioDataXML = xml;
             loadDrawioXml(xml);
           } else {
-            setDrawioStatus("error");
-            setDrawioError("Failed to compile diagram for editor.");
+            // Fallback to universal visual SVG wrapper
+            if (renderedSvg || canvasSvg) {
+              const xml = compileSvgToDrawioXml(renderedSvg || canvasSvg);
+              drawioDataXML = xml;
+              loadDrawioXml(xml);
+            } else {
+              setDrawioStatus("error");
+              setDrawioError("Failed to compile diagram for editor.");
+            }
           }
         }
       } else {
@@ -862,8 +921,15 @@ export default function Home() {
             drawioDataXML = xml;
             loadDrawioXml(xml);
           } catch (err: any) {
-            setDrawioStatus("error");
-            setDrawioError(err.message || "Failed to generate diagram for editor.");
+            // Fallback to universal visual SVG wrapper
+            if (renderedSvg || canvasSvg) {
+              const xml = compileSvgToDrawioXml(renderedSvg || canvasSvg);
+              drawioDataXML = xml;
+              loadDrawioXml(xml);
+            } else {
+              setDrawioStatus("error");
+              setDrawioError(err.message || "Failed to generate diagram for editor.");
+            }
           }
         }
       }
@@ -1325,6 +1391,127 @@ export default function Home() {
     // Normalize line endings
     let clean = code.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
+    // ── NUCLEAR PRE-PASS: split ANY word squashed against Mermaid keywords ────
+    // Handles: "endclassDef", "transfer_fundsactor", "nodeIdsubgraph", etc.
+    // Runs unconditionally on every call, regardless of diagram type.
+    // Keywords covered: all statement-level Mermaid keywords that crash the
+    // parser when attached to a preceding word character.
+    const SQUASH_KEYWORDS = [
+      "classDef", "subgraph", "direction", "participant", "actor",
+      "section", "title", "end", "class", "note", "loop", "alt",
+      "else", "opt", "par", "critical", "break", "rect",
+    ];
+    for (let i = 0; i < 5; i++) {
+      const prev = clean;
+      for (const kw of SQUASH_KEYWORDS) {
+        // Only split when the keyword is followed by a space or end-of-line
+        // to avoid false positives inside quoted labels.
+        clean = clean.replace(
+          new RegExp(`([a-zA-Z0-9_])(${kw}(?=\\s|$))`, "g"),
+          "$1\n$2"
+        );
+      }
+      if (clean === prev) break;
+    }
+    // ── END NUCLEAR PRE-PASS ──────────────────────────────────────────────────
+
+    // ── STRIP QUOTES FROM PIPE EDGE LABELS ───────────────────────────────────
+    // Mermaid pipe-label syntax |label| does NOT support double-quoted strings.
+    // The LLM sometimes emits: -.->|"«include»"| which crashes with 'got STR'.
+    // Strip the surrounding quotes: |"label"| → |label|
+    clean = clean.replace(/\|"([^"]+)"\|/g, "|$1|");
+    // ── END STRIP QUOTES FROM PIPE EDGE LABELS ───────────────────────────────
+
+    // ── STRIP direction FROM INSIDE SUBGRAPHS ────────────────────────────────
+    // Top-level flowchart TD/LR controls all subgraph directions.
+    // "direction" inside a subgraph causes squash crashes — strip them.
+    {
+      const lines = clean.split("\n");
+      let insideSubgraph = 0;
+      const filtered = lines.filter(line => {
+        const t = line.trim();
+        if (/^subgraph\b/i.test(t)) { insideSubgraph++; return true; }
+        if (/^end\s*$/i.test(t) && insideSubgraph > 0) { insideSubgraph--; return true; }
+        if (insideSubgraph > 0 && /^direction\s+(?:TD|LR|TB|BT|RL)\s*$/i.test(t)) return false;
+        return true;
+      });
+      clean = filtered.join("\n");
+    }
+    // ── END STRIP direction FROM INSIDE SUBGRAPHS ────────────────────────────
+
+    // ── REPLACE ALL classDef/class IN FLOWCHARTS WITH CLEAN BLOCK ────────────
+    // The LLM generates classDef lines with multi-line styles, squashed tokens,
+    // and invalid formatting that reliably crashes the Mermaid parser.
+    // Solution: strip ALL LLM-generated classDef and class lines, then append
+    // a single clean, guaranteed-valid style block at the end of the diagram.
+    {
+      const firstMeaningfulLine = clean
+        .split("\n")
+        .find(l => l.trim() && !l.trim().startsWith("%%"))
+        ?.trim()?.toLowerCase() || "";
+      const isFlowchart = firstMeaningfulLine.startsWith("flowchart") || firstMeaningfulLine.startsWith("graph ");
+      if (isFlowchart) {
+        // Strip ALL classDef and bare `class nodeId className` lines
+        const strippedLines = clean.split("\n").filter(l => {
+          const t = l.trim();
+          if (/^classDef\b/i.test(t)) return false;
+          if (/^class\s+\w+\s+\w+/i.test(t)) return false;
+          // Also strip "class nodeId fill:..." where classname+css are squashed (no separate classname token)
+          if (/^class\s+\w+\s+(?:fill|stroke|color|font)/i.test(t)) return false;
+          return true;
+        });
+        // Append clean, single-line classDef block
+        const cleanStyleBlock = [
+          "classDef service fill:#1a2540,stroke:#5b8df8,color:#e4eaf8,stroke-width:2px;",
+          "classDef database fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;",
+          "classDef external fill:#25183a,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;",
+          "classDef ui fill:#1a1e30,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;",
+          "classDef queue fill:#2a1a18,stroke:#f87171,color:#e4eaf8,stroke-width:2px;",
+          "classDef gateway fill:#0e1f28,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;",
+          "classDef process fill:#1a2035,stroke:#5b8df8,color:#e4eaf8,stroke-width:1px;",
+          "classDef actor fill:#0c1524,stroke:#3b82f6,color:#e4eaf8,stroke-width:2px;",
+          "classDef usecase fill:#1a2035,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;",
+          "classDef decision fill:#2a1a18,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;",
+          "classDef milestone fill:#0e1f28,stroke:#d4ff00,color:#e4eaf8,stroke-width:2px;",
+        ];
+        clean = [...strippedLines, ...cleanStyleBlock].join("\n");
+      }
+    }
+    // ── END REPLACE classDef/class IN FLOWCHARTS ──────────────────────────────
+
+    // ── SPLIT MULTI-NODE class ASSIGNMENTS ────────────────────────────────────
+    // "class nodeA nodeB service" → "class nodeA service\nclass nodeB service"
+    clean = clean.replace(
+      /^([ \t]*)class\s+(\w+(?:\s+\w+)+)\s+(\w+)\s*$/gm,
+      (_match, indent, ids, cls) =>
+        ids.trim().split(/\s+/).map((id: string) => `${indent}class ${id} ${cls}`).join("\n")
+    );
+    // ── END SPLIT MULTI-NODE class ASSIGNMENTS ────────────────────────────────
+
+    // ── STRIP STYLE PROPERTIES FROM class ASSIGNMENT LINES ───────────────────
+    // "class nodeId actor fill:#0c1524,stroke:..." → "class nodeId actor"
+    clean = clean.replace(
+      /^([ \t]*class\s+\w+\s+\w+)\s+(?:fill|stroke|color|font)[^;\n]*/gm,
+      "$1"
+    );
+    // ── STRIP ORPHANED KEYWORD+CSS LINES ──────────────────────────────────────
+    // When the squash pre-pass splits "flat_volume_nodeactor fill:#..." into:
+    //   flat_volume_node
+    //   actor fill:#0c1524,stroke:...
+    // the second line is an invalid statement. Strip any line that is a bare
+    // Mermaid classDef class name followed immediately by CSS properties.
+    clean = clean.replace(
+      /^[ \t]*(?:actor|service|database|external|ui|queue|gateway|process|usecase|decision|milestone)\s+(?:fill|stroke|color|font)[^;\n]*/gm,
+      ""
+    );
+    // "endactor" / "endclass" → "end\nactor" / "end\nclass"
+    for (let i = 0; i < 5; i++) {
+      const prev = clean;
+      clean = clean.replace(/\b(end)((?:actor|class|participant|note|section|title)\b)/gi, "$1\n$2");
+      if (clean === prev) break;
+    }
+    // ── END STRIP STYLE PROPERTIES FROM class ASSIGNMENT LINES ───────────────
+
     // ── STRIP classDef/class FROM NON-FLOWCHART DIAGRAMS ─────────────────────
     // classDef and class assignment statements are ONLY valid inside flowchart.
     // When the LLM emits them inside erDiagram, sequenceDiagram, classDiagram,
@@ -1342,6 +1529,11 @@ export default function Home() {
         firstMeaningfulLine.startsWith("flowchart") ||
         firstMeaningfulLine.startsWith("graph ");
       if (!isFlowchartBase) {
+        // Pre-split: handle "endclassDef" squash (end + classDef on same token)
+        // so the per-line filter below can see the classDef line independently.
+        clean = clean.replace(/\b(end)(classDef)\b/gi, "$1\n$2");
+        // Also split any other word immediately followed by classDef (e.g. "nodeIdclassDef")
+        clean = clean.replace(/(\w)(classDef\s)/gi, "$1\n$2");
         // Remove every line that starts with classDef or is a class assignment
         clean = clean
           .split("\n")
@@ -1358,6 +1550,34 @@ export default function Home() {
       }
     }
     // ── END STRIP classDef/class FROM NON-FLOWCHART DIAGRAMS ─────────────────
+
+    // ── JOIN BROKEN classDef LINES ────────────────────────────────────────────
+    // The LLM sometimes emits classDef style properties split across multiple
+    // lines, e.g.:
+    //   classDef actor fill:#0c1524,
+    //   stroke:#3b82f6,color:#e4eaf8;
+    // Mermaid requires all classDef properties on a SINGLE line. A classDef
+    // ending with a comma means the next line is a continuation — join them.
+    {
+      const joinedLines: string[] = [];
+      const ls = clean.split("\n");
+      for (let i = 0; i < ls.length; i++) {
+        const line = ls[i];
+        if (/^\s*classDef\s+\w+/i.test(line.trim()) && line.trimEnd().endsWith(",")) {
+          // Collect continuation lines until the style string is complete
+          let merged = line.trimEnd();
+          while (i + 1 < ls.length && !merged.trimEnd().endsWith(";") && ls[i + 1].trim() !== "" && !/^\s*(classDef|class|subgraph|end)\b/i.test(ls[i + 1])) {
+            i++;
+            merged = merged + ls[i].trim();
+          }
+          joinedLines.push(merged);
+        } else {
+          joinedLines.push(line);
+        }
+      }
+      clean = joinedLines.join("\n");
+    }
+    // ── END JOIN BROKEN classDef LINES ────────────────────────────────────────
 
     // ── STRIP INVALID NODE ATTRIBUTE BAGS ────────────────────────────────────
     // Must run first — before any other pass — because the LLM sometimes emits
@@ -1503,6 +1723,8 @@ export default function Home() {
     clean = clean.replace(new RegExp(`(graph\\s+${DIR})(subgraph)`, "gi"), "$1\n$2");
     clean = clean.replace(/(subgraph\s+\S+)(subgraph)/gi, "$1\n$2");
     clean = clean.replace(/(\bend\b)(subgraph)/gi, "$1\n$2");
+    clean = clean.replace(/(\bend\b)(classDef\s)/gi, "$1\n$2");
+    clean = clean.replace(/(\bend\b)(class\s)/gi, "$1\n$2");
     clean = clean.replace(/\s*LAYOUT_WITH_LEGEND(\(\))?\s*/gi, "\nLAYOUT_WITH_LEGEND()\n");
     clean = clean.replace(/((?:graph|flowchart)\s+(?:TD|LR|RL|BT|TB))\s*(?!\n)/g, "$1\n");
     clean = clean.replace(/(subgraph\s+[^\n]+)\s*(?!\n)/g, "$1\n");
@@ -1666,18 +1888,82 @@ export default function Home() {
     const applyPatterns = (input: string): string => {
       let s = input;
 
-      // ── Strip classDef/class from non-flowchart diagrams ──────────────────
+      // ── NUCLEAR PRE-PASS: split ANY word squashed against Mermaid keywords ──
+      {
+        const KW = [
+          "classDef", "subgraph", "direction", "participant", "actor",
+          "section", "title", "end", "class", "note", "loop", "alt",
+          "else", "opt", "par", "critical", "break", "rect",
+        ];
+        for (let i = 0; i < 5; i++) {
+          const prev = s;
+          for (const kw of KW) {
+            s = s.replace(new RegExp(`([a-zA-Z0-9_])(${kw}(?=\\s|$))`, "g"), "$1\n$2");
+          }
+          if (s === prev) break;
+        }
+      }
+      // ── END NUCLEAR PRE-PASS ────────────────────────────────────────────────
+
+      // Strip double-quoted pipe labels: |"label"| → |label|
+      s = s.replace(/\|"([^"]+)"\|/g, "|$1|");
+
+      // Strip direction lines inside subgraphs
+      {
+        const lines = s.split("\n");
+        let depth = 0;
+        s = lines.filter(line => {
+          const t = line.trim();
+          if (/^subgraph\b/i.test(t)) { depth++; return true; }
+          if (/^end\s*$/i.test(t) && depth > 0) { depth--; return true; }
+          if (depth > 0 && /^direction\s+(?:TD|LR|TB|BT|RL)\s*$/i.test(t)) return false;
+          return true;
+        }).join("\n");
+      }
+
+      // ── Strip and replace classDef/class ────────────────────────────────────
       {
         const firstLine = s.split("\n").find(l => l.trim() && !l.trim().startsWith("%%"))?.trim()?.toLowerCase() || "";
         const isFlowchart = firstLine.startsWith("flowchart") || firstLine.startsWith("graph ");
-        if (!isFlowchart) {
+        if (isFlowchart) {
+          // Strip all LLM classDef/class lines; append clean guaranteed block
+          const stripped = s.split("\n").filter(l => {
+            const t = l.trim();
+            if (/^classDef\b/i.test(t)) return false;
+            if (/^class\s+\w+\s+\w+/i.test(t)) return false;
+            return true;
+          });
+          const styleBlock = [
+            "classDef service fill:#1a2540,stroke:#5b8df8,color:#e4eaf8,stroke-width:2px;",
+            "classDef database fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;",
+            "classDef external fill:#25183a,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;",
+            "classDef ui fill:#1a1e30,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;",
+            "classDef queue fill:#2a1a18,stroke:#f87171,color:#e4eaf8,stroke-width:2px;",
+            "classDef gateway fill:#0e1f28,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;",
+            "classDef process fill:#1a2035,stroke:#5b8df8,color:#e4eaf8,stroke-width:1px;",
+            "classDef actor fill:#0c1524,stroke:#3b82f6,color:#e4eaf8,stroke-width:2px;",
+            "classDef usecase fill:#1a2035,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;",
+            "classDef decision fill:#2a1a18,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;",
+            "classDef milestone fill:#0e1f28,stroke:#d4ff00,color:#e4eaf8,stroke-width:2px;",
+          ];
+          s = [...stripped, ...styleBlock].join("\n");
+        } else {
+          // Non-flowchart: strip all classDef/class
           s = s.split("\n").filter(l => {
             const t = l.trim();
-            if (/^classDef\s+\w+/i.test(t)) return false;
-            if (/^class\s+\w+\s+\w+$/i.test(t) && !firstLine.startsWith("classdiagram")) return false;
+            if (/^classDef\b/i.test(t)) return false;
+            if (/^class\s+\w+\s+\w+/i.test(t) && !firstLine.startsWith("classdiagram")) return false;
             return true;
           }).join("\n");
         }
+      }
+
+      // Strip style properties from class assignment lines & split end+keyword squash
+      s = s.replace(/^([ \t]*class\s+\w+\s+\w+)\s+(?:fill|stroke|color|font)[^;\n]*/gm, "$1");
+      for (let i = 0; i < 5; i++) {
+        const prev = s;
+        s = s.replace(/\b(end)((?:actor|class|participant|note|section|title)\b)/gi, "$1\n$2");
+        if (s === prev) break;
       }
 
       // ── Strip invalid LLM-hallucinated node attribute bags ────────────────
@@ -1754,39 +2040,76 @@ export default function Home() {
     // Always run applyPatterns one more time — idempotent if already clean
     let guardedCode = applyPatterns(applyPatterns(finalCode));
 
-    // ── Stage 4: Guaranteed line-by-line direction split ─────────────────────
-    // This pass is UNCONDITIONAL — it runs on every line regardless of what
-    // previous passes did. It directly scans each line for the `direction TD/LR/...`
-    // pattern and splits the line at EVERY occurrence, no matter what surrounds it.
-    // This is the absolute last resort — it cannot be defeated by quote-aware logic,
-    // label-quoting passes, or any other pre-processing.
-    guardedCode = guardedCode.split("\n").flatMap(line => {
-      // Comment lines and lines without `direction` are returned unchanged.
-      if (line.trim().startsWith("%%")) return [line];
-      if (!/direction\s+(?:TD|LR|TB|BT|RL)/i.test(line)) return [line];
+    // ── applyFinalPasses: Stages 4-6, applied to BOTH guardedCode and repairedCode ──
+    const applyFinalPasses = (input: string): string => {
+      let s = input;
 
-      // The line contains `direction` — check if it's already isolated
-      // (i.e. `direction` is the only meaningful token on the line).
-      const stripped = line.trim();
-      if (/^direction\s+(?:TD|LR|TB|BT|RL)\s*$/i.test(stripped)) return [line];
+      // Stage 4: Guaranteed line-by-line direction split
+      s = s.split("\n").flatMap(line => {
+        if (line.trim().startsWith("%%")) return [line];
+        if (!/direction\s+(?:TD|LR|TB|BT|RL)/i.test(line)) return [line];
+        const stripped = line.trim();
+        if (/^direction\s+(?:TD|LR|TB|BT|RL)\s*$/i.test(stripped)) return [line];
+        const DIR_RE = /(.*?)\s*(direction\s+(?:TD|LR|TB|BT|RL))\s*(.*)/i;
+        const match = line.match(DIR_RE);
+        if (!match) return [line];
+        const before = match[1]?.trim() ?? "";
+        const dir    = match[2]?.trim() ?? "";
+        const after  = match[3]?.trim() ?? "";
+        const parts: string[] = [];
+        if (before) parts.push(before);
+        parts.push(dir);
+        if (after) parts.push(after);
+        return parts;
+      }).join("\n");
 
-      // The line has `direction TD/LR/...` surrounded by other content.
-      // Split it into up to 3 parts: before / direction / after.
-      const DIR_RE = /(.*?)\s*(direction\s+(?:TD|LR|TB|BT|RL))\s*(.*)/i;
-      const match = line.match(DIR_RE);
-      if (!match) return [line];
+      // Stage 5: nuclear keyword split + classDef join
+      {
+        const KW5 = [
+          "classDef", "subgraph", "direction", "participant", "actor",
+          "section", "title", "end", "class", "note", "loop", "alt",
+          "else", "opt", "par", "critical", "break", "rect",
+        ];
+        for (let pass = 0; pass < 5; pass++) {
+          const prev = s;
+          for (const kw of KW5) {
+            s = s.replace(new RegExp(`([a-zA-Z0-9_])(${kw}(?=\\s|$))`, "g"), "$1\n$2");
+          }
+          if (s === prev) break;
+        }
+      }
+      {
+        const ls = s.split("\n");
+        const out: string[] = [];
+        for (let i = 0; i < ls.length; i++) {
+          const line = ls[i];
+          if (/^\s*classDef\s+\w+/i.test(line.trim()) && line.trimEnd().endsWith(",")) {
+            let merged = line.trimEnd();
+            while (i + 1 < ls.length && !merged.endsWith(";") && ls[i + 1].trim() !== "" && !/^\s*(classDef|subgraph|end)\b/i.test(ls[i + 1])) {
+              i++; merged += ls[i].trim();
+            }
+            out.push(merged);
+          } else { out.push(line); }
+        }
+        s = out.join("\n");
+      }
 
-      const before = match[1]?.trim() ?? "";
-      const dir    = match[2]?.trim() ?? "";
-      const after  = match[3]?.trim() ?? "";
+      // Stage 6: strip quoted pipe labels + split squashed edge targets
+      s = s.replace(/\|"([^"]+)"\|/g, "|$1|");
+      s = s.replace(
+        /((?:-->|-.->|-->>?|===>?|~~~)\s*\|[^|]*\|\s*)([a-zA-Z_][a-zA-Z0-9_]*)([a-zA-Z_][a-zA-Z0-9_]*(?:\s*[\[({]))/g,
+        "$1$2\n$3"
+      );
+      s = s.replace(
+        /((?:-->|-.->|-->>?|===>?|~~~)\s*)([a-zA-Z_][a-zA-Z0-9_]*)([a-zA-Z_][a-zA-Z0-9_]*\s*[\[({])/g,
+        "$1$2\n$3"
+      );
 
-      const parts: string[] = [];
-      if (before) parts.push(before);
-      parts.push(dir);
-      if (after) parts.push(after);
-      return parts;
-    }).join("\n");
-    // ── END Stage 4 ──────────────────────────────────────────────────────────
+      return s;
+    };
+    // ── END applyFinalPasses ──────────────────────────────────────────────────
+
+    guardedCode = applyFinalPasses(guardedCode);
 
     const m = (window as any).mermaid;
     const renderId = "mermaid-render-" + Math.random().toString(36).substring(2, 9);
@@ -1802,7 +2125,7 @@ export default function Home() {
 
       // ── Auto-repair: extra applyPatterns pass ─────────────────────────────
       if (e.message && /lexical error|parse error|unrecognized text|No diagram type/i.test(e.message)) {
-        const repairedCode = applyPatterns(guardedCode);
+        let repairedCode = applyFinalPasses(applyPatterns(guardedCode));
         console.warn("[renderMermaidMarkup] Attempting repair. Repaired code:\n" + repairedCode);
         try {
           const repairRenderId = "mermaid-render-repair-" + Math.random().toString(36).substring(2, 9);
@@ -1814,12 +2137,22 @@ export default function Home() {
           return svg;
         } catch (repairErr: any) {
           console.error("[renderMermaidMarkup] Repair also failed:", repairErr);
-          setCanvasError(
-            `Diagram rendering failed.\n\nError: ${repairErr.message || repairErr}\n\nGenerated code (first 500 chars):\n${repairedCode.slice(0, 500)}`
-          );
-          const badElem = document.getElementById(renderId);
-          if (badElem) badElem.remove();
-          return null;
+          // ── Fallback: render a minimal valid diagram instead of showing error ──
+          try {
+            const fallbackId = "mermaid-render-fallback-" + Math.random().toString(36).substring(2, 9);
+            const fallbackCode = `flowchart TD\n  note["⚠️ Diagram syntax issue — please try regenerating"]\n  classDef service fill:#1a2540,stroke:#5b8df8,color:#e4eaf8,stroke-width:2px;\n  class note service`;
+            const { svg: fallbackSvg } = await m.render(fallbackId, fallbackCode);
+            setCanvasSvg(fallbackSvg);
+            setCanvasError("Diagram had a syntax issue and was regenerated in fallback mode. Try regenerating for the full diagram.");
+            return fallbackSvg;
+          } catch {
+            setCanvasError(
+              `Diagram rendering failed.\n\nError: ${repairErr.message || repairErr}\n\nGenerated code (first 500 chars):\n${repairedCode.slice(0, 500)}`
+            );
+            const badElem = document.getElementById(renderId);
+            if (badElem) badElem.remove();
+            return null;
+          }
         }
       }
 
@@ -1887,7 +2220,21 @@ export default function Home() {
 
   const manualPushCodeToCanvas = async (customCode: string) => {
     setMermaidCode(customCode);
-    await renderMermaidMarkup(customCode);
+    const renderedSvg = await renderMermaidMarkup(customCode);
+    if (renderedSvg) {
+      const xml = compileSvgToDrawioXml(renderedSvg);
+      setDrawioXML(xml);
+      loadDrawioXml(xml);
+      if (activeApplicationId) {
+        const app = applications.find(a => a.id === activeApplicationId);
+        if (app) {
+          const updatedApp = { ...app, mermaidCode: customCode, drawioXML: xml };
+          saveApplication(updatedApp);
+          refreshApplications(activeProjectId || app.projectId || "");
+        }
+      }
+      triggerToast("Diagram updated in preview canvas and draw.io editor! ✓", false);
+    }
   };
 
   // ----------------------------------------------------
@@ -1977,17 +2324,7 @@ export default function Home() {
     setDrawioStatus("loading");
     setDrawioError(null);
 
-    const loadXml = (xml: string) => {
-      drawioXmlRef.current = xml;
-      setDrawioXML(xml);
-      setDrawioStatus("loaded");
-      if (drawioReady) {
-        iframeRef.current?.contentWindow?.postMessage(
-          JSON.stringify({ action: "load", xml, autosave: 1 }),
-          "*"
-        );
-      }
-    };
+    const loadXml = loadDrawioXml;
 
     try {
       if (compilerMethod === "visual" || compilerMethod === "deterministic") {
@@ -2039,18 +2376,32 @@ export default function Home() {
     setDrawioError(null);
     setPromptInput("");
 
-    await renderMermaidMarkup(app.mermaidCode);
+    const renderedSvg = await renderMermaidMarkup(app.mermaidCode);
 
-    if (app.drawioXML) {
-      setDrawioStatus("loaded");
-      // Load iframe if ready, otherwise wait for messages init
-      iframeRef.current?.contentWindow?.postMessage(
-        JSON.stringify({ action: "load", xml: app.drawioXML, autosave: 1 }),
-        "*"
-      );
-    } else {
-      setDrawioStatus("empty");
+    let drawioXml = app.drawioXML;
+    if (!drawioXml && app.mermaidCode) {
+      try {
+        if (app.blueprint) {
+          drawioXml = compileBlueprintToDrawio(app.blueprint, renderedSvg || undefined, resolvedLogos);
+        } else if (renderedSvg) {
+          drawioXml = compileSvgToDrawioXml(renderedSvg);
+        }
+      } catch (err) {
+        console.warn("Failed local blueprint compile on load, falling back to visual SVG compile", err);
+        if (renderedSvg) {
+          drawioXml = compileSvgToDrawioXml(renderedSvg);
+        }
+      }
+
+      if (drawioXml) {
+        setDrawioXML(drawioXml);
+        const updatedApp = { ...app, drawioXML: drawioXml };
+        saveApplication(updatedApp);
+        refreshApplications(activeProjectId || app.projectId || "");
+      }
     }
+
+    loadDrawioXml(drawioXml);
     setActiveTab("diagram");
     triggerToast(`Loaded diagram: ${app.name} ✓`, false);
   };
@@ -2205,19 +2556,33 @@ export default function Home() {
     setCanvasError(null);
     setDrawioError(null);
 
-    await renderMermaidMarkup(entry.mermaidCode);
+    const renderedSvg = await renderMermaidMarkup(entry.mermaidCode);
 
-    if (entry.drawioXML) {
-      setDrawioStatus("loaded");
-      if (drawioReady) {
-        iframeRef.current?.contentWindow?.postMessage(
-          JSON.stringify({ action: "load", xml: entry.drawioXML, autosave: 1 }),
-          "*"
-        );
+    let drawioXml = entry.drawioXML;
+    if (!drawioXml && entry.mermaidCode) {
+      try {
+        if (entry.blueprint) {
+          drawioXml = compileBlueprintToDrawio(entry.blueprint, renderedSvg || undefined, resolvedLogos);
+        } else if (renderedSvg) {
+          drawioXml = compileSvgToDrawioXml(renderedSvg);
+        }
+      } catch (err) {
+        console.warn("Failed blueprint compile on history load, falling back to visual SVG compile", err);
+        if (renderedSvg) {
+          drawioXml = compileSvgToDrawioXml(renderedSvg);
+        }
       }
-    } else {
-      setDrawioStatus("empty");
+
+      if (drawioXml) {
+        setDrawioXML(drawioXml);
+        entry.drawioXML = drawioXml;
+        const updatedHistory = stateHistory.map(h => h.id === entry.id ? { ...h, drawioXML: drawioXml } : h);
+        setStateHistory(updatedHistory);
+        saveHistoryToLocalStorage(updatedHistory);
+      }
     }
+
+    loadDrawioXml(drawioXml);
 
     setActiveTab("diagram");
     triggerToast("Loaded diagram from history ✓", false);

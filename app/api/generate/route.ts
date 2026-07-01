@@ -4,6 +4,8 @@ import { NextRequest, NextResponse } from "next/server";
 // Check if API key is configured
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
 
 // Initialize Gemini Client only if key is available
 const ai = GEMINI_API_KEY && GEMINI_API_KEY !== "your-gemini-api-key-here"
@@ -33,6 +35,11 @@ Strict rules:
 4. Every edge "from" and "to" must reference an existing, declared node ID.
 5. All JSON fields must strictly conform to the schema below.
 6. MANDATORY LABEL ICONS: Prepended a highly relevant, colored emoji icon to the front of every node "label" (e.g., "🖥️ Web Client", "🚀 API Gateway", "🗄️ MySQL Database", "📬 Kafka Queue", "👤 Admin User", "🔒 Cognito Auth", "⚙️ Order Processor") to make the resulting diagram deeply visual, intuitive, and professional.
+7. MANDATORY CONNECTIONS — EDGES ARE REQUIRED:
+   EVERY node MUST appear in at least one edge as either "from" or "to". Isolated nodes with zero connections are a CRITICAL ERROR.
+   MINIMUM edges = number_of_nodes - 1 (to form a connected graph). For a 10-node diagram, produce at least 9 edges (ideally 12-20 for realistic flows).
+   ALL edge "from" and "to" values MUST reference a node ID declared in the groups array above.
+   NEVER produce a blueprint with an empty "edges" array unless the diagram has exactly 1 node.
 
 JSON SCHEMA:
 {
@@ -53,10 +60,10 @@ JSON SCHEMA:
       ]
     }
   ],
-  "edges": [
+  "edges": [  // REQUIRED — minimum (number_of_nodes - 1) entries; every node MUST appear in at least one edge
     {
-      "from": "source_node_id",
-      "to": "target_node_id",
+      "from": "source_node_id",  // MUST be a declared node ID from the groups array
+      "to": "target_node_id",    // MUST be a declared node ID from the groups array
       "label": "1-3 words description or empty string",
       "style": "solid" | "dashed"
     }
@@ -86,7 +93,33 @@ Classification Guidance:
 - interaction_overview: For UML Interaction Overview. Nodes=ref frames and decisions.
 - it_roadmap: For IT/Product Roadmaps. Groups=planning horizons, nodes=initiatives/milestones.
 - service_blueprint: For Service Blueprints. Groups=service layers, nodes=touchpoints/actions.
-- swimlane: For Cross-functional Swimlane flowcharts. Groups=lanes (actors), nodes=process steps.`;
+- swimlane: For Cross-functional Swimlane flowcharts. Groups=lanes (actors), nodes=process steps.
+
+Edge Generation by Diagram Kind — MANDATORY CONNECTIONS reference:
+- flowchart: Connect services in data-flow order (client → gateway → service → database → cache). Add cross-group edges for all inter-service communication.
+- sequence: Each participant sends or receives at least one message arrow (->>).
+- er: Every entity relates to at least one other entity via relationship lines.
+- class: Every class has at least one inheritance, association, or dependency arrow.
+- state: Every state has at least one transition arrow; include [*] → InitialState and FinalState → [*].
+- c4context/c4container/c4component: Every Person/System/Container appears in at least one Rel() call.
+- bpmn: Connect start event → tasks → gateways → end event within each pool; use dashed edges for inter-pool message flows.
+- archimate: Connect elements across layers (business → application → technology) with serving/realisation edges.
+- dfd: External entity → process → data store; process → process for sub-flows. Every external entity has at least one incoming and one outgoing data flow.
+- vsm: Linear left-to-right chain: process → inventory → process → inventory → timeline row.
+- capability_map: Connect capability domains that depend on each other; connect individual capabilities within a domain in maturity progression.
+- network_topology: Every device connects to at least one other device; label edges with protocol (HTTPS, TCP, etc.).
+- deployment: Artefact → artefact deploy relationships; deployment node → deployment node communication paths.
+- component: Component → interface → component dependency chains; every component has at least one provided or required interface edge.
+- use_case: Actor → use case associations; use case -.-> use case for «include»/«extend» relationships.
+- activity: Initial → action → decision → branch actions → merge → final; every action node connects to the flow.
+- communication: Numbered message edges between every pair of interacting objects.
+- package: Dashed dependency arrows between packages; classifiers inside packages link to those in other packages.
+- object: Solid link edges between every object instance that has a relationship.
+- timing: State transition edges horizontally across the time axis; vertical dashed edges between lifelines at synchronisation points.
+- interaction_overview: Sequential flow edges connecting all reference frames and decision nodes.
+- it_roadmap: Initiative → initiative dependency arrows (left to right); milestone diamonds linked to their initiatives.
+- service_blueprint: Vertical linking edges between all adjacent service layers (Customer → Frontstage → Backstage → Support → Physical Evidence).
+- swimlane: Process step edges across lane boundaries for every handoff; connect every step in order.`;
 
 const REFINER_SYSTEM = `You are an expert enterprise systems architect and design diagrams editor.
 Your task is to take an existing Blueprint JSON representing an architecture layout, and apply a natural language modification instruction to it.
@@ -161,6 +194,7 @@ WRONG — will crash:
 RULE 4 — SUBGRAPH STRUCTURE
 ══════════════════════════════════════════════
 subgraph title, direction, nodes, and end must each be on separate lines.
+The \`end\` keyword MUST always be alone on its own line — never followed by classDef, another keyword, or any other token.
 
 CORRECT:
   subgraph "Service Layer"
@@ -171,6 +205,7 @@ CORRECT:
 WRONG:
   subgraph "Service Layer"
   direction TDA("Auth") --> B("Orders")end
+  endclassDef service fill:#1a2540
 
 ══════════════════════════════════════════════
 RULE 5 — NO MARKDOWN FENCES
@@ -203,7 +238,6 @@ Adding classDef to those diagram types will CRASH the parser immediately.
 
 WRONG — will crash erDiagram:
   erDiagram
-  classDef database fill:#1a2e2b,stroke:#38d9c0  ← ILLEGAL, crashes parser
   USERS ||--o{ ORDERS : "places"
 
 CORRECT erDiagram — no classDef at all:
@@ -235,6 +269,8 @@ Before returning your output, scan every line and verify:
 5. Is there any text before the diagram type declaration? → Remove it.
 6. Does the diagram type require connections/edges? → Ensure EVERY node has at least one connection.
 7. Is this NOT a flowchart diagram? → Remove ALL classDef and class lines — they CRASH non-flowchart parsers.
+8. Does any \`end\` keyword appear on the same line as another token (e.g. \`end\`followed immediately by \`classDef\`, a node ID, or \`subgraph\`)? → \`end\` MUST be alone on its own line with NOTHING before or after it.
+9. Does any subgraph body contain a \`direction TD/LR\` line? → REMOVE IT. Subgraph direction is never needed; the top-level flowchart direction applies everywhere and direction inside subgraphs causes parser crashes.
 If any check fails, fix it before outputting.
 
 Node IDs must strictly match [a-zA-Z][a-zA-Z0-9_]*.
@@ -248,15 +284,9 @@ GUIDELINES BY KIND:
   Shape syntax: rect=id["L"], round=id("L"), diamond=id{"L"}, cylinder=id[("L")], hexagon=id{{"L"}}, stadium=id(["L"])
   Edges: A --> B or A -->|Label| B. Dashed: A -.-> B or A -. Label .-> B.
   Groups: each blueprint group → subgraph group_id ["Group Label"] on its own line, then nodes, then end on its own line. ALL subgraphs before any edges.
-  Color palette — add these classDef lines at the very bottom, each on its own line:
-    classDef service  fill:#1a2540,stroke:#5b8df8,color:#e4eaf8,stroke-width:2px;
-    classDef database fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;
-    classDef external fill:#25183a,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;
-    classDef ui       fill:#1a1e30,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;
-    classDef queue    fill:#2a1a18,stroke:#f87171,color:#e4eaf8,stroke-width:2px;
-    classDef gateway  fill:#0e1f28,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;
-    classDef process  fill:#1a2035,stroke:#5b8df8,color:#e4eaf8,stroke-width:1px;
-  Assign: class nodeId service (each on its own line)
+  CRITICAL — DO NOT add "direction TD" or "direction LR" inside subgraphs. The top-level "flowchart TD/LR" controls direction for ALL subgraphs. Adding direction inside a subgraph causes squash crashes.
+  (Styling is auto-applied — do NOT output classDef lines)
+  Assign class names only: class nodeId service (each on its own line, after all edges)
 
   EXACT OUTPUT FORMAT (every statement on its own line, no exceptions):
   %%{init: {"theme": "dark", "flowchart": {"curve": "stepBefore"}}}%%
@@ -268,7 +298,6 @@ GUIDELINES BY KIND:
   api_gateway["🚀 API Gateway"]
   end
   web_client --> api_gateway
-  classDef service fill:#1a2540,stroke:#5b8df8,color:#e4eaf8,stroke-width:2px;
   class web_client service
   class api_gateway gateway
 
@@ -349,115 +378,94 @@ GUIDELINES BY KIND:
   Second line: flowchart TD
   Use subgraph per pool/lane. Tasks=rect nodes, Gateways=diamond nodes, Start events=stadium nodes (🟢 prefix), End events=hexagon nodes (🔴 prefix).
   Inter-pool message flows use dashed edges.
-  classDef task fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
-  classDef gateway fill:#2a1a18,stroke:#f87171,color:#e4eaf8;
-  classDef event fill:#0e1f28,stroke:#38d9c0,color:#e4eaf8;
+  (Styling is auto-applied — do NOT output classDef lines)
+  Assign class names only: class nodeId task (or gateway/event) on each its own line.
 
 - archimate:
   flowchart TD with subgraphs for each layer (Motivation, Strategy, Business, Application, Technology, Physical).
   Layer labels must include emoji: "🎯 Motivation", "📋 Strategy", "💼 Business", "⚙️ Application", "🖥️ Technology".
   Direction TD (layers stack vertically). Serving/realisation edges = dashed. Assignment edges = solid.
-  classDef motivation fill:#1a1224,stroke:#9d72ff,color:#e4eaf8;
-  classDef business fill:#1a2035,stroke:#fbbf24,color:#e4eaf8;
-  classDef application fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8;
-  classDef technology fill:#111215,stroke:#5b8df8,color:#e4eaf8;
+  (Styling is auto-applied — do NOT output classDef lines)
+  Assign class names only: class nodeId motivation (or business/application/technology) on each its own line.
 
 - dfd:
   flowchart TD. External entities=rect with 🔲 prefix. Processes=round with ⚙️ prefix. Data stores=cylinder with 🗄️ prefix.
   All edges labelled with data item name.
-  classDef external fill:#25183a,stroke:#9d72ff,color:#e4eaf8;
-  classDef process fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
-  classDef store fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8;
+  (Styling is auto-applied — do NOT output classDef lines)
+  Assign class names only: class nodeId external (or process/store) on each its own line.
 
 - vsm:
   flowchart LR. Process boxes=rect with ⚙️. Inventory triangles between processes=diamond with 📦. Push arrows=solid, pull arrows=dashed.
   Last subgraph is "⏱️ Timeline" with lead time nodes.
-  classDef process fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
-  classDef inventory fill:#2a1a18,stroke:#f87171,color:#e4eaf8;
+  (Styling is auto-applied — do NOT output classDef lines)
+  Assign class names only: class nodeId process (or inventory) on each its own line.
 
 - capability_map:
   flowchart TD. subgraphs for capability domains. Capabilities are rect nodes coloured by maturity (1=red, 2=orange, 3=yellow, 4=green, 5=bright green).
-  classDef mat1 fill:#4a1a1a,stroke:#f87171,color:#e4eaf8;
-  classDef mat2 fill:#3a2a1a,stroke:#fbbf24,color:#e4eaf8;
-  classDef mat3 fill:#2a3a1a,stroke:#d4ff00,color:#e4eaf8;
-  classDef mat4 fill:#1a3a2a,stroke:#38d9c0,color:#e4eaf8;
-  classDef mat5 fill:#1a2a3a,stroke:#5b8df8,color:#e4eaf8;
+  (Styling is auto-applied — do NOT output classDef lines)
+  Assign class names only: class nodeId mat1 (or mat2/mat3/mat4/mat5) on each its own line.
 
 - network_topology:
   flowchart TD. Servers=cylinder with 🖥️. Routers/switches=hexagon with 🔀. Firewalls=stadium with 🔥. Clients=rect with 💻. Cloud=round with ☁️.
   Edges labelled with protocol (TCP/IP, HTTPS, etc.) and bandwidth.
-  classDef server fill:#101614,stroke:#38d9c0,color:#e4eaf8;
-  classDef network fill:#1c1110,stroke:#ef4444,color:#e4eaf8;
-  classDef firewall fill:#0e1f28,stroke:#fbbf24,color:#e4eaf8;
+  (Styling is auto-applied — do NOT output classDef lines)
+  Assign class names only: class nodeId server (or network/firewall) on each its own line.
 
 - deployment:
   flowchart TD. Deployment nodes=subgraphs with 🖥️ labels. Execution environments=nested subgraphs. Artefacts=stadium nodes with 📦.
   Deploy edges=dashed. Communication edges=solid.
-  classDef node fill:#111215,stroke:#5b8df8,color:#e4eaf8;
-  classDef artefact fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8;
+  (Styling is auto-applied — do NOT output classDef lines)
+  Assign class names only: class nodeId node (or artefact) on each its own line.
 
 - component:
   flowchart TD. Components=rect with ⚙️. Interfaces=small round nodes with 🔌. Dependencies=dashed arrows. Composition=solid arrows.
-  classDef component fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
-  classDef interface fill:#0e1f28,stroke:#38d9c0,color:#e4eaf8;
+  (Styling is auto-applied — do NOT output classDef lines)
+  Assign class names only: class nodeId component (or interface) on each its own line.
 
 - use_case:
   flowchart TD. System boundary=subgraph with dashed style. Actors=stadium with 👤. Use cases=round with ○.
-  Include=dashed with "«include»" label. Extend=dashed with "«extend»" label.
-  classDef actor fill:#0c1524,stroke:#3b82f6,color:#e4eaf8;
-  classDef usecase fill:#1a2035,stroke:#9d72ff,color:#e4eaf8;
+  Include=dashed edge with label «include» (NO quotes around the label — pipe syntax only: -.->|«include»| ).
+  Extend=dashed edge with label «extend» (NO quotes: -.->|«extend»| ).
+  NEVER use double quotes inside pipe labels: -.->|"«include»"| is INVALID and crashes the parser.
+  CORRECT:   uc_login -.->|«include»| uc_verify
+  WRONG:     uc_login -.->|"«include»"| uc_verify
+  Each edge must be on its own line. Node IDs must not be squashed together — always put a newline between the edge arrow and the next statement.
 
 - activity:
   flowchart TD. Actions=rect. Decisions=diamond. Fork/join=hexagon (◼ prefix). Initial=stadium (⬤). Final=hexagon (⊗).
   Guard conditions on edges in square brackets.
-  classDef action fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
-  classDef decision fill:#2a1a18,stroke:#fbbf24,color:#e4eaf8;
-  classDef fork fill:#111215,stroke:#999999,color:#e4eaf8;
 
 - communication:
   flowchart LR. Objects=rect. Messages=edges labelled with sequence number: "1: methodName()".
   Bidirectional messages use two separate edges with numbers.
-  classDef object fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
 
 - package:
   flowchart TD. Packages=subgraphs. Classifiers inside=rect. Dependency arrows=dashed. Import=dashed with "«import»". Merge=dashed with "«merge»".
-  classDef classifier fill:#1a2035,stroke:#9d72ff,color:#e4eaf8;
 
 - object:
   flowchart TD. Object instances=rect, label format "instanceName : ClassName" (underline implied). Attribute slots in label (multiline using <br/>).
   Links=solid edges. Dependency=dashed.
-  classDef instance fill:#1a2035,stroke:#38d9c0,color:#e4eaf8;
 
 - timing:
   flowchart LR. One row per lifeline = one subgraph. State-value nodes along horizontal axis=rect with state label. Time transitions=solid edges rightward.
   State changes=vertical dashed edges between states.
-  classDef state fill:#1a2035,stroke:#38d9c0,color:#e4eaf8;
 
 - interaction_overview:
   flowchart TD. Reference frames=round with "ref: Name" label. Combined fragments=diamond. Sequential flow=solid. Alt/loop=dashed.
-  classDef ref fill:#25183a,stroke:#9d72ff,color:#e4eaf8;
-  classDef fragment fill:#2a1a18,stroke:#fbbf24,color:#e4eaf8;
 
 - it_roadmap:
   flowchart LR. subgraphs for planning horizons: "🟢 Now (Q1-Q2)", "🟡 Next (Q3-Q4)", "🔵 Later (FY+1)".
   Initiatives=rect inside horizons. Milestones=diamond with 🎯. Phase gates=stadium with 🚦.
   Dependency arrows between initiatives. Timeline flows left to right.
-  classDef initiative fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
-  classDef milestone fill:#0e1f28,stroke:#d4ff00,color:#e4eaf8;
 
 - service_blueprint:
   flowchart LR. One subgraph per service layer (top to bottom): "👤 Customer Actions", "🎭 Frontstage", "👁️ Line of Visibility", "⚙️ Backstage", "🔧 Support Processes", "📦 Physical Evidence".
   Touchpoints=rect. Actions=round. Vertical inter-layer linking edges=dashed.
-  classDef customer fill:#0c1524,stroke:#3b82f6,color:#e4eaf8;
-  classDef frontstage fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8;
-  classDef backstage fill:#25183a,stroke:#9d72ff,color:#e4eaf8;
 
 - swimlane:
   flowchart LR (or TD based on blueprint direction). One subgraph per lane (actor/department).
   Process steps=rect. Decisions=diamond. Start=stadium (▶). End=hexagon (⏹).
   Cross-lane handoff edges=solid with activity label. Return flows=dashed.
-  classDef step fill:#1a2035,stroke:#5b8df8,color:#e4eaf8;
-  classDef decision fill:#2a1a18,stroke:#fbbf24,color:#e4eaf8;
 `;
 }
 
@@ -518,6 +526,113 @@ function sanitizeContent(text: string): string {
   // Normalize line endings
   clean = clean.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
+  // ── NUCLEAR PRE-PASS: split ANY word squashed against Mermaid keywords ──
+  // Catches "endclassDef", "transfer_fundsactor", "nodeIdsubgraph", etc.
+  // Runs unconditionally before any other logic, regardless of diagram type.
+  {
+    const KW = [
+      "classDef", "subgraph", "direction", "participant", "actor",
+      "section", "title", "end", "class", "note", "loop", "alt",
+      "else", "opt", "par", "critical", "break", "rect",
+    ];
+    for (let i = 0; i < 5; i++) {
+      const prev = clean;
+      for (const kw of KW) {
+        clean = clean.replace(new RegExp(`([a-zA-Z0-9_])(${kw}(?=\\s|$))`, "g"), "$1\n$2");
+      }
+      if (clean === prev) break;
+    }
+  }
+  // ── END NUCLEAR PRE-PASS ──────────────────────────────────────────────────
+
+  // ── STRIP QUOTES FROM PIPE EDGE LABELS ───────────────────────────────────
+  // Mermaid pipe-label syntax |label| does NOT support double-quoted strings.
+  // The LLM sometimes emits: -.->|"«include»"| which crashes with 'got STR'.
+  // Strip the surrounding quotes: |"label"| → |label|
+  clean = clean.replace(/\|"([^"]+)"\|/g, "|$1|");
+  // ── END STRIP QUOTES FROM PIPE EDGE LABELS ───────────────────────────────
+
+  // ── STRIP direction FROM INSIDE SUBGRAPHS ────────────────────────────────
+  // The top-level "flowchart TD/LR" controls direction for all subgraphs.
+  // Adding "direction TD/LR" inside a subgraph body is the #1 cause of
+  // squash crashes like "Actors"]direction TDcustomer([".
+  // Strip ALL direction lines that appear between a subgraph...end pair.
+  {
+    const lines = clean.split("\n");
+    let insideSubgraph = 0;
+    const filtered = lines.filter(line => {
+      const t = line.trim();
+      if (/^subgraph\b/i.test(t)) { insideSubgraph++; return true; }
+      if (/^end\s*$/i.test(t) && insideSubgraph > 0) { insideSubgraph--; return true; }
+      if (insideSubgraph > 0 && /^direction\s+(?:TD|LR|TB|BT|RL)\s*$/i.test(t)) return false;
+      return true;
+    });
+    clean = filtered.join("\n");
+  }
+  // ── END STRIP direction FROM INSIDE SUBGRAPHS ────────────────────────────
+
+  // ── REPLACE ALL classDef/class IN FLOWCHARTS WITH CLEAN BLOCK ────────────
+  // Strip all LLM-generated classDef lines (broken multi-line, squashed, etc.)
+  // and append a single guaranteed-valid style block instead.
+  {
+    const firstMeaningfulLine = clean
+      .split("\n")
+      .find((l: string) => l.trim() && !l.trim().startsWith("%%"))
+      ?.trim()?.toLowerCase() || "";
+    const isFlowchart = firstMeaningfulLine.startsWith("flowchart") || firstMeaningfulLine.startsWith("graph ");
+    if (isFlowchart) {
+      const strippedLines = clean.split("\n").filter((l: string) => {
+        const t = l.trim();
+        if (/^classDef\b/i.test(t)) return false;
+        if (/^class\s+\w+\s+\w+/i.test(t)) return false;
+        return true;
+      });
+      const cleanStyleBlock = [
+        "classDef service fill:#1a2540,stroke:#5b8df8,color:#e4eaf8,stroke-width:2px;",
+        "classDef database fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;",
+        "classDef external fill:#25183a,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;",
+        "classDef ui fill:#1a1e30,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;",
+        "classDef queue fill:#2a1a18,stroke:#f87171,color:#e4eaf8,stroke-width:2px;",
+        "classDef gateway fill:#0e1f28,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;",
+        "classDef process fill:#1a2035,stroke:#5b8df8,color:#e4eaf8,stroke-width:1px;",
+        "classDef actor fill:#0c1524,stroke:#3b82f6,color:#e4eaf8,stroke-width:2px;",
+        "classDef usecase fill:#1a2035,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;",
+        "classDef decision fill:#2a1a18,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;",
+        "classDef milestone fill:#0e1f28,stroke:#d4ff00,color:#e4eaf8,stroke-width:2px;",
+      ];
+      clean = [...strippedLines, ...cleanStyleBlock].join("\n");
+    }
+  }
+  // ── END REPLACE classDef/class IN FLOWCHARTS ─────────────────────────────
+
+  // ── SPLIT MULTI-NODE class ASSIGNMENTS ────────────────────────────────────
+  // The LLM sometimes emits: "class nodeA nodeB service" (multiple IDs).
+  // Valid Mermaid only allows: "class nodeId className" (one ID at a time).
+  // Split: class n1 n2 className → class n1 className\nclass n2 className
+  clean = clean.replace(
+    /^([ \t]*)class\s+(\w+(?:\s+\w+)+)\s+(\w+)\s*$/gm,
+    (_match: string, indent: string, ids: string, cls: string) =>
+      ids.trim().split(/\s+/).map((id: string) => `${indent}class ${id} ${cls}`).join("\n")
+  );
+  // ── END SPLIT MULTI-NODE class ASSIGNMENTS ────────────────────────────────
+
+  // ── STRIP STYLE PROPERTIES FROM class ASSIGNMENT LINES ───────────────────
+  // Valid: class nodeId className
+  // Invalid (crashes parser): class nodeId className fill:#0c1524,stroke:#3b82f6
+  // Strip any style properties that follow the className on a class line.
+  clean = clean.replace(
+    /^([ \t]*class\s+\w+\s+\w+)\s+(?:fill|stroke|color|font)[^;\n]*/gm,
+    "$1"
+  );
+  // Also handle "end" squashed directly against "actor"/"class"/other keywords:
+  // "endactor" → "end\nactor", "endclass" → "end\nclass"
+  for (let i = 0; i < 5; i++) {
+    const prev = clean;
+    clean = clean.replace(/\b(end)((?:actor|class|participant|note|section|title)\b)/gi, "$1\n$2");
+    if (clean === prev) break;
+  }
+  // ── END STRIP STYLE PROPERTIES FROM class ASSIGNMENT LINES ───────────────
+
   // ── STRIP INVALID NODE ATTRIBUTE BAGS ────────────────────────────────────
   // Must run before all other passes. The LLM sometimes emits non-existent
   // Mermaid syntax like:
@@ -543,6 +658,10 @@ function sanitizeContent(text: string): string {
       firstMeaningfulLine.startsWith("flowchart") ||
       firstMeaningfulLine.startsWith("graph ");
     if (!isFlowchartBase) {
+      // Pre-split: "endclassDef" squash — split before the per-line filter sees it
+      clean = clean.replace(/\b(end)(classDef)\b/gi, "$1\n$2");
+      // Also split any other word immediately followed by classDef (e.g. "nodeIdclassDef")
+      clean = clean.replace(/(\w)(classDef\s)/gi, "$1\n$2");
       clean = clean
         .split("\n")
         .filter((l: string) => {
@@ -555,6 +674,32 @@ function sanitizeContent(text: string): string {
     }
   }
   // ── END STRIP classDef/class FROM NON-FLOWCHART DIAGRAMS ─────────────────
+
+  // ── JOIN BROKEN classDef LINES ──────────────────────────────────────────────
+  // The LLM sometimes wraps classDef style properties across lines with a
+  // trailing comma, e.g.:
+  //   classDef actor fill:#0c1524,
+  //   stroke:#3b82f6,color:#e4eaf8;
+  // Mermaid requires all classDef properties on one line — join continuations.
+  {
+    const joinedLines: string[] = [];
+    const ls = clean.split("\n");
+    for (let i = 0; i < ls.length; i++) {
+      const line = ls[i];
+      if (/^\s*classDef\s+\w+/i.test(line.trim()) && line.trimEnd().endsWith(",")) {
+        let merged = line.trimEnd();
+        while (i + 1 < ls.length && !merged.trimEnd().endsWith(";") && ls[i + 1].trim() !== "" && !/^\s*(classDef|class|subgraph|end)\b/i.test(ls[i + 1])) {
+          i++;
+          merged = merged + ls[i].trim();
+        }
+        joinedLines.push(merged);
+      } else {
+        joinedLines.push(line);
+      }
+    }
+    clean = joinedLines.join("\n");
+  }
+  // ── END JOIN BROKEN classDef LINES ─────────────────────────────────────────
 
   // ── STEP 0: Direct regex keyword injection ────────────────────────────────
   // Targeted pre-pass first — handles the specific crash pattern
@@ -785,6 +930,8 @@ function sanitizeContent(text: string): string {
   clean = clean.replace(/(subgraph\s+\S+)(subgraph)/gi, "$1\n$2");
   clean = clean.replace(/(\bend\b)(subgraph)/gi, "$1\n$2");
   clean = clean.replace(/(\bend\b)(flowchart)/gi, "$1\n$2");
+  clean = clean.replace(/(\bend\b)(classDef\s)/gi, "$1\n$2");
+  clean = clean.replace(/(\bend\b)(class\s)/gi, "$1\n$2");
   clean = clean.replace(new RegExp(`(flowchart\\s+${DIR})(end\\b)`, "gi"), "$1\n$2");
 
   // LAYOUT_WITH_LEGEND always on its own line
@@ -890,15 +1037,60 @@ async function generateWithFallback({
   // Check if any LLM provider is configured
   const hasGeminiKey = GEMINI_API_KEY && GEMINI_API_KEY !== "your-gemini-api-key-here";
   const hasGroqKey = GROQ_API_KEY && GROQ_API_KEY !== "your-groq-api-key-here";
+  const hasOpenRouterKey = OPENROUTER_API_KEY && OPENROUTER_API_KEY !== "your-openrouter-api-key-here";
+  const hasMistralKey = MISTRAL_API_KEY && MISTRAL_API_KEY !== "your-mistral-api-key-here";
 
-  if (!hasGeminiKey && !hasGroqKey) {
+  if (!hasGeminiKey && !hasGroqKey && !hasOpenRouterKey && !hasMistralKey) {
     throw new Error(
-      "No LLM API key configured. Please set GEMINI_API_KEY or GROQ_API_KEY in your .env file. " +
+      "No LLM API key configured. Please set GEMINI_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, or OPENROUTER_API_KEY in your .env file. " +
       "Get a Gemini key at https://aistudio.google.com/apikey"
     );
   }
 
-  // Try Gemini first if the API key is configured
+  // Helper: extract plain text from multimodal contents
+  const extractTextContents = (c: any): string => {
+    if (typeof c === "string") return c;
+    if (Array.isArray(c)) return c.map((x: any) => x.text || JSON.stringify(x)).join("\n");
+    if (c?.parts && Array.isArray(c.parts)) return c.parts.map((p: any) => p.text || "").join("\n");
+    return JSON.stringify(c);
+  };
+
+  // Helper: call any OpenAI-compatible endpoint
+  const callOpenAICompat = async (
+    url: string,
+    apiKey: string,
+    model: string,
+    extraHeaders: Record<string, string> = {}
+  ): Promise<string> => {
+    const textContents = extractTextContents(contents);
+    const messages = [
+      { role: "system", content: systemInstruction },
+      { role: "user", content: textContents },
+    ];
+    const payload: any = { model, messages, temperature };
+    if (responseMimeType === "application/json") {
+      payload.response_format = { type: "json_object" };
+    }
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        ...extraHeaders,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`API ${url} returned HTTP ${response.status}: ${errorText}`);
+    }
+    const data = await response.json();
+    const text = data?.choices?.[0]?.message?.content;
+    if (text) return text;
+    throw new Error(`Empty response from ${url}`);
+  };
+
+  // ── 1. Try Gemini first ───────────────────────────────────────────────────
   if (hasGeminiKey && ai) {
     try {
       const response = await ai.models.generateContent({
@@ -910,85 +1102,123 @@ async function generateWithFallback({
           responseMimeType: responseMimeType as any,
         },
       });
-
       const text = response.text;
-      if (text) {
-        return text;
-      }
+      if (text) return text;
       throw new Error("Gemini returned an empty text response.");
     } catch (err: any) {
-      console.warn("Gemini model execution failed, attempting fallback...", err.message || err);
+      console.warn("Gemini failed, trying fallbacks...", err.message || err);
       geminiError = err;
     }
   } else if (!hasGeminiKey) {
-    geminiError = new Error("GEMINI_API_KEY not configured (using placeholder value).");
+    geminiError = new Error("GEMINI_API_KEY not configured.");
   }
 
-  // If Gemini failed or was skipped, try GROQ fallback
+  // ── 2. Try Groq ───────────────────────────────────────────────────────────
   if (hasGroqKey) {
-    console.log("Using Groq API fallback with model 'llama-3.3-70b-versatile'...");
+    console.log("Using Groq fallback (llama-3.3-70b-versatile)...");
     try {
-      // Safely extract string content for Groq which is text-only
-      let textContents = "";
-      if (typeof contents === "string") {
-        textContents = contents;
-      } else if (contents && typeof contents === "object") {
-        if (Array.isArray(contents)) {
-          textContents = contents.map((c: any) => c.text || JSON.stringify(c)).join("\n");
-        } else if (contents.parts && Array.isArray(contents.parts)) {
-          textContents = contents.parts.map((p: any) => p.text || "").join("\n");
-        } else {
-          textContents = JSON.stringify(contents);
-        }
-      } else {
-        textContents = String(contents);
-      }
-
-      const messages = [
-        { role: "system", content: systemInstruction },
-        { role: "user", content: textContents }
-      ];
-
-      const payload: any = {
-        model: "llama-3.3-70b-versatile",
-        messages: messages,
-        temperature: temperature,
-      };
-
-      if (responseMimeType === "application/json") {
-        payload.response_format = { type: "json_object" };
-      }
-
-      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${GROQ_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`GROQ API returned HTTP ${response.status}: ${errorText}`);
-      }
-
-      const data = await response.json();
-      const outputText = data?.choices?.[0]?.message?.content;
-      if (outputText) {
-        return outputText;
-      }
-      throw new Error("GROQ returned an empty response.");
+      return await callOpenAICompat(
+        "https://api.groq.com/openai/v1/chat/completions",
+        GROQ_API_KEY as string,
+        "llama-3.3-70b-versatile"
+      );
     } catch (groqError: any) {
-      console.error("GROQ fallback also failed:", groqError);
+      console.warn("Groq fallback failed, trying OpenRouter...", groqError.message || groqError);
+    }
+  }
+
+  // ── 3. Try Mistral ───────────────────────────────────────────────────────
+  if (hasMistralKey) {
+    console.log("Using Mistral fallback (mistral-large-latest)...");
+    try {
+      return await callOpenAICompat(
+        "https://api.mistral.ai/v1/chat/completions",
+        MISTRAL_API_KEY as string,
+        "mistral-large-latest"
+      );
+    } catch (mistralError: any) {
+      console.warn("Mistral fallback failed, trying OpenRouter...", mistralError.message || mistralError);
+    }
+  }
+
+  // ── 4. Try OpenRouter (final fallback) ────────────────────────────────────
+  if (hasOpenRouterKey) {
+    console.log("Using OpenRouter final fallback (google/gemini-2.0-flash-exp:free)...");
+    try {
+      return await callOpenAICompat(
+        "https://openrouter.ai/api/v1/chat/completions",
+        OPENROUTER_API_KEY as string,
+        "google/gemini-2.0-flash-exp:free",
+        {
+          "HTTP-Referer": process.env.APP_URL || "https://archprompt.app",
+          "X-Title": "ArchPrompt",
+        }
+      );
+    } catch (openRouterErr: any) {
+      console.error("OpenRouter fallback also failed:", openRouterErr);
       throw new Error(
-        `Both primary Gemini API and Groq fallback failed.\nGemini Error: ${geminiError?.message || geminiError}\nGroq Error: ${groqError.message || groqError}`
+        `All LLM providers failed.\nGemini: ${geminiError?.message || geminiError}\nGroq: exhausted\nMistral: exhausted\nOpenRouter: ${openRouterErr.message || openRouterErr}`
       );
     }
   }
 
-  // No Groq key and Gemini failed
-  throw new Error(`Primary Gemini API execution failed and no Groq fallback API key was provided.\nGemini Error: ${geminiError?.message || geminiError}`);
+  // No remaining providers
+  throw new Error(`All configured LLM providers failed.\nGemini Error: ${geminiError?.message || geminiError}`);
+}
+
+function normalizeBlueprint(blueprint: any): any {
+  if (!blueprint) return blueprint;
+
+  const normId = (id: string): string => {
+    if (!id) return "";
+    return id.trim().toLowerCase().replace(/[-\s]+/g, "_").replace(/[^\w]/g, "");
+  };
+
+  const idMap: Record<string, string> = {};
+
+  // 1. Normalize group IDs
+  if (Array.isArray(blueprint.groups)) {
+    blueprint.groups.forEach((g: any) => {
+      if (g && g.id) {
+        const oldId = g.id;
+        const newId = normId(oldId);
+        g.id = newId;
+        idMap[oldId] = newId;
+        idMap[oldId.toLowerCase()] = newId;
+      }
+
+      // 2. Normalize node IDs
+      if (g && Array.isArray(g.nodes)) {
+        g.nodes.forEach((n: any) => {
+          if (n && n.id) {
+            const oldId = n.id;
+            const newId = normId(oldId);
+            n.id = newId;
+            idMap[oldId] = newId;
+            idMap[oldId.toLowerCase()] = newId;
+          }
+        });
+      }
+    });
+  }
+
+  // 3. Normalize edge references
+  if (Array.isArray(blueprint.edges)) {
+    blueprint.edges = blueprint.edges.filter((e: any) => e && e.from && e.to);
+    blueprint.edges.forEach((e: any) => {
+      const oldFrom = e.from;
+      const oldTo = e.to;
+
+      // Resolve from the map (handles case mismatch or dashes/spaces)
+      const newFrom = idMap[oldFrom] || idMap[oldFrom.toLowerCase()] || normId(oldFrom);
+      const newTo = idMap[oldTo] || idMap[oldTo.toLowerCase()] || normId(oldTo);
+
+      e.from = newFrom;
+      e.to = newTo;
+    });
+  }
+
+  return blueprint;
 }
 
 // Handle POST requests
@@ -1053,7 +1283,7 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      return NextResponse.json({ blueprint: parsed });
+      return NextResponse.json({ blueprint: normalizeBlueprint(parsed) });
 
     } else if (stage === 2) {
       if (!blueprint) {
@@ -1168,7 +1398,7 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      return NextResponse.json({ blueprint: parsed });
+      return NextResponse.json({ blueprint: normalizeBlueprint(parsed) });
 
     } else {
       return NextResponse.json({ error: "Invalid 'stage' value." }, { status: 400 });

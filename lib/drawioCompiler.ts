@@ -770,7 +770,6 @@ function compileFlowchartDiagram(
       allGroups.push({ ...g, nodes: g.nodes ? [...g.nodes] : [] });
     }
   }
-
   const processedNodeIds = new Set<string>();
   for (const gp of allGroups) {
     nodesByGroup[gp.id] = gp.nodes || [];
@@ -812,47 +811,170 @@ function compileFlowchartDiagram(
       const parser = new DOMParser();
       const doc = parser.parseFromString(renderedSvg, "image/svg+xml");
       const allNodeIds = new Set<string>();
-      for (const gp of allGroups) for (const n of gp.nodes || []) allNodeIds.add(n.id);
-
-      const gNodes = doc.querySelectorAll("g.node, g.mermaid-node");
-      for (const el of Array.from(gNodes)) {
-        const idAttr = el.getAttribute("id") || "";
-        let matchedNodeId: string | null = null;
-        for (const nodeId of allNodeIds) {
-          if (idAttr === nodeId ||
-              idAttr.startsWith(`flowchart-${nodeId}-`) ||
-              idAttr.split("-").includes(nodeId) ||
-              idAttr.replace(/^c4-/, "") === nodeId ||
-              idAttr.replace(/^c4-/, "").split("-")[0] === nodeId) {
-            matchedNodeId = nodeId; break;
-          }
+      const nodeIdToLabel: Record<string, string> = {};
+      for (const gp of allGroups) {
+        for (const n of gp.nodes || []) {
+          allNodeIds.add(n.id);
+          nodeIdToLabel[n.id] = (n.label || "").toLowerCase().replace(/[^\w]/g, "");
         }
-        if (matchedNodeId) {
-          const transform = el.getAttribute("transform") || "";
-          const tm = transform.match(/translate\(\s*(-?\d+\.?\d*)\s*[\s,]\s*(-?\d+\.?\d*)\s*\)/i);
-          if (tm) {
-            const cx = parseFloat(tm[1]);
-            const cy = parseFloat(tm[2]);
-            let w = nodeW, h = nodeH;
-            const rect = el.querySelector("rect");
-            if (rect) {
-              const rw = rect.getAttribute("width"); const rh = rect.getAttribute("height");
-              if (rw) w = parseFloat(rw); if (rh) h = parseFloat(rh);
-            } else {
-              const other = el.querySelector("path, polygon, circle, ellipse, foreignObject");
-              if (other) {
-                const ow = other.getAttribute("width"); const oh = other.getAttribute("height");
-                if (ow && oh) { w = parseFloat(ow); h = parseFloat(oh); }
-              }
-            }
-            let left = cx - w / 2, top = cy - h / 2;
-            const rx = rect?.getAttribute("x"); const ry = rect?.getAttribute("y");
-            if (rx && ry) { left = cx + parseFloat(rx); top = cy + parseFloat(ry); }
-            parsedNodeLayouts[matchedNodeId] = { x: cx, y: cy, w, h, left, top };
+      }
+
+      // ── Compute viewBox scale factor ──────────────────────────────────────
+      // Mermaid uses a large internal coordinate space in viewBox; translate()
+      // values are in those units and must be scaled to match pixel positions.
+      let scaleX = 1, scaleY = 1;
+      const rootSvg = doc.querySelector("svg");
+      if (rootSvg) {
+        const vb = rootSvg.getAttribute("viewBox");
+        const svgW = parseFloat(rootSvg.getAttribute("width") || "0");
+        const svgH = parseFloat(rootSvg.getAttribute("height") || "0");
+        if (vb) {
+          const parts = vb.trim().split(/[\s,]+/);
+          if (parts.length === 4) {
+            const vbW = parseFloat(parts[2]);
+            const vbH = parseFloat(parts[3]);
+            if (svgW > 0 && vbW > 0) scaleX = svgW / vbW;
+            if (svgH > 0 && vbH > 0) scaleY = svgH / vbH;
           }
         }
       }
-      if (Object.keys(parsedNodeLayouts).length > 0) hasParsedLayout = true;
+
+      // ── Helper: parse translate() from a transform string ─────────────────
+      const parseTranslate = (transform: string): [number, number] => {
+        const m = transform.match(/translate\(\s*(-?[\d.]+)\s*[,\s]\s*(-?[\d.]+)\s*\)/i);
+        if (m) return [parseFloat(m[1]), parseFloat(m[2])];
+        const m2 = transform.match(/translate\(\s*(-?[\d.]+)\s*\)/i);
+        if (m2) return [parseFloat(m2[1]), 0];
+        return [0, 0];
+      };
+
+      // ── Helper: sum ancestor translate transforms up to <svg> root ────────
+      const getAccumulatedTranslate = (el: Element): [number, number] => {
+        let tx = 0, ty = 0;
+        let cur: Element | null = el.parentElement;
+        while (cur && cur.tagName.toLowerCase() !== "svg") {
+          const t = cur.getAttribute("transform") || "";
+          if (t) { const [dx, dy] = parseTranslate(t); tx += dx; ty += dy; }
+          cur = cur.parentElement;
+        }
+        return [tx * scaleX, ty * scaleY];
+      };
+
+      // ── Normalized ID comparison helpers ──────────────────────────────────
+      // Mermaid IDs: "flowchart-api_gateway-0", "sequence-Actor-0", "c4-web_client-1"
+      const normalizeId = (s: string) =>
+        s.toLowerCase()
+          .replace(/^(flowchart|sequence|class|state|c4|er|mindmap|gantt|bpmn|dfd|vsm|swimlane|activity|deployment|network|component|usecase|use_case|timing|interaction|package|object|archimate|capability|roadmap|blueprint)-/g, "")
+          .replace(/-\d+$/, "")
+          .replace(/[-\s]/g, "_");
+
+      const idsMatch = (idAttr: string, nodeId: string): boolean => {
+        if (!idAttr || !nodeId) return false;
+        if (idAttr === nodeId) return true;
+        // "flowchart-<nodeId>-<n>" (with underscores or hyphens)
+        if (idAttr.startsWith(`flowchart-${nodeId}-`)) return true;
+        if (idAttr.startsWith(`flowchart-${nodeId.replace(/_/g, "-")}-`)) return true;
+        // Normalized comparison
+        const normAttr = normalizeId(idAttr);
+        const normNode = normalizeId(nodeId);
+        if (normAttr === normNode) return true;
+        if (normAttr.startsWith(normNode + "_") || normAttr.startsWith(normNode + "-")) return true;
+        // All underscore-segments of nodeId appear as hyphen-segments in idAttr
+        const segments = idAttr.split("-");
+        const nodeSegs = nodeId.split("_");
+        if (nodeSegs.length > 1 && nodeSegs.every(seg => segments.includes(seg))) return true;
+        return false;
+      };
+
+      // ── Broad selector: all Mermaid node-like <g> elements ───────────────
+      const gNodes = doc.querySelectorAll(
+        "g.node, g.mermaid-node, g[class*='node'], " +
+        "g[id*='flowchart-'], g[id*='sequence-'], g[id*='c4-'], " +
+        "g[id*='er-'], g[id*='class-'], g[id*='state-'], g[class*='actor']"
+      );
+
+      for (const el of Array.from(gNodes)) {
+        const idAttr = el.getAttribute("id") || "";
+        const classAttr = el.getAttribute("class") || "";
+
+        // Skip edges, clusters, labels
+        if (classAttr.includes("edge") || classAttr.includes("cluster") ||
+            classAttr.includes("edgeLabel") || idAttr.startsWith("edge") ||
+            idAttr.includes("Label")) continue;
+
+        let matchedNodeId: string | null = null;
+
+        // 1. ID-based matching (primary)
+        for (const nodeId of allNodeIds) {
+          if (idsMatch(idAttr, nodeId)) { matchedNodeId = nodeId; break; }
+        }
+
+        // 2. Label-text fallback for unmatched elements
+        if (!matchedNodeId) {
+          const textEl = el.querySelector("text, .label, tspan, foreignObject span");
+          const rawText = textEl?.textContent?.toLowerCase().replace(/[^\w]/g, "") || "";
+          if (rawText.length > 2) {
+            for (const nodeId of allNodeIds) {
+              if (!parsedNodeLayouts[nodeId]) {
+                const lbl = nodeIdToLabel[nodeId];
+                if (lbl && lbl.length > 3 && rawText.includes(lbl)) {
+                  matchedNodeId = nodeId; break;
+                }
+              }
+            }
+          }
+        }
+
+        if (!matchedNodeId) continue;
+        if (parsedNodeLayouts[matchedNodeId]) continue; // keep first match
+
+        // ── Compute absolute position from own + parent transforms ─────────
+        const ownTransform = el.getAttribute("transform") || "";
+        const [ox, oy] = parseTranslate(ownTransform);
+        const [pax, pay] = getAccumulatedTranslate(el);
+        const cx = (ox * scaleX) + pax;
+        const cy = (oy * scaleY) + pay;
+
+        // ── Extract dimensions ────────────────────────────────────────────
+        let w = nodeW, h = nodeH;
+        const rect = el.querySelector("rect");
+        if (rect) {
+          const rw = rect.getAttribute("width"); const rh = rect.getAttribute("height");
+          if (rw && parseFloat(rw) > 0) w = parseFloat(rw) * scaleX;
+          if (rh && parseFloat(rh) > 0) h = parseFloat(rh) * scaleY;
+        } else {
+          const other = el.querySelector("ellipse, circle, polygon, path, foreignObject");
+          if (other) {
+            if (other.tagName === "ellipse") {
+              const erx = other.getAttribute("rx"); const ery = other.getAttribute("ry");
+              if (erx) w = parseFloat(erx) * 2 * scaleX;
+              if (ery) h = parseFloat(ery) * 2 * scaleY;
+            } else {
+              const ow = other.getAttribute("width"); const oh = other.getAttribute("height");
+              if (ow && parseFloat(ow) > 0) w = parseFloat(ow) * scaleX;
+              if (oh && parseFloat(oh) > 0) h = parseFloat(oh) * scaleY;
+            }
+          }
+        }
+        if (w < 10) w = nodeW;
+        if (h < 10) h = nodeH;
+
+        // Mermaid centers transforms on node center; rect may carry x/y offsets
+        let left = cx - w / 2, top = cy - h / 2;
+        if (rect) {
+          const rx = rect.getAttribute("x"); const ry = rect.getAttribute("y");
+          if (rx && ry) { left = cx + parseFloat(rx) * scaleX; top = cy + parseFloat(ry) * scaleY; }
+        }
+
+        parsedNodeLayouts[matchedNodeId] = { x: cx, y: cy, w, h, left, top };
+      }
+
+      if (Object.keys(parsedNodeLayouts).length > 0) {
+        hasParsedLayout = true;
+        console.log(`[drawioCompiler] SVG layout: ${Object.keys(parsedNodeLayouts).length}/${allNodeIds.size} nodes matched (scale ${scaleX.toFixed(2)}×${scaleY.toFixed(2)})`);
+      } else {
+        console.warn("[drawioCompiler] SVG parse matched 0 nodes — using grid fallback");
+      }
     } catch (err) { console.error("Error parsing SVG layout coordinates:", err); }
   }
 
