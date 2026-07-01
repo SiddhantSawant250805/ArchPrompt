@@ -1391,21 +1391,55 @@ export default function Home() {
     // Normalize line endings
     let clean = code.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
+    // ── HOIST classDef/class LINES OUT BEFORE ANY SPLIT PASSES ──────────────
+    // classDef lines contain keywords ("actor", "classDef", etc.) that appear in
+    // the nuclear split KW list. Running splits on classDef lines corrupts them
+    // (e.g. "classDef actor fill:..." → "classDef\nactor fill:...").
+    // Extract them first, run all splits on the body, re-append at the end.
+    const firstMeaningfulLineForHoist = clean
+      .split("\n")
+      .find(l => l.trim() && !l.trim().startsWith("%%"))
+      ?.trim()?.toLowerCase() || "";
+    const isFlowchartForHoist =
+      firstMeaningfulLineForHoist.startsWith("flowchart") ||
+      firstMeaningfulLineForHoist.startsWith("graph ");
+    let savedClassAssignments: string[] = [];
+    if (isFlowchartForHoist) {
+      const bodyLines: string[] = [];
+      for (const line of clean.split("\n")) {
+        const t = line.trim();
+        if (/^classDef\b/i.test(t)) continue; // strip – re-append fresh block later
+        if (/^class\s+\w+\s+\w+/i.test(t)) {
+          // Save clean assignment (strip any trailing CSS properties)
+          const cleaned = t.replace(/^(class\s+\w+\s+\w+)\s+(?:fill|stroke|color|font)[^;\n]*/i, "$1");
+          savedClassAssignments.push(cleaned);
+        } else {
+          bodyLines.push(line);
+        }
+      }
+      clean = bodyLines.join("\n");
+    } else {
+      // Non-flowchart: strip all classDef/class entirely
+      clean = clean.split("\n").filter(l => {
+        const t = l.trim();
+        if (/^classDef\b/i.test(t)) return false;
+        if (/^class\s+\w+\s+\w+/i.test(t) && !firstMeaningfulLineForHoist.startsWith("classdiagram")) return false;
+        return true;
+      }).join("\n");
+    }
+    // ── END HOIST ─────────────────────────────────────────────────────────────
+
     // ── NUCLEAR PRE-PASS: split ANY word squashed against Mermaid keywords ────
-    // Handles: "endclassDef", "transfer_fundsactor", "nodeIdsubgraph", etc.
-    // Runs unconditionally on every call, regardless of diagram type.
-    // Keywords covered: all statement-level Mermaid keywords that crash the
-    // parser when attached to a preceding word character.
+    // Handles: "endsubgraph", "transfer_fundsactor", "nodeIdsubgraph", etc.
+    // classDef is intentionally omitted — classDef lines were hoisted out above.
     const SQUASH_KEYWORDS = [
-      "classDef", "subgraph", "direction", "participant", "actor",
+      "subgraph", "direction", "participant", "actor",
       "section", "title", "end", "class", "note", "loop", "alt",
       "else", "opt", "par", "critical", "break", "rect",
     ];
     for (let i = 0; i < 5; i++) {
       const prev = clean;
       for (const kw of SQUASH_KEYWORDS) {
-        // Only split when the keyword is followed by a space or end-of-line
-        // to avoid false positives inside quoted labels.
         clean = clean.replace(
           new RegExp(`([a-zA-Z0-9_])(${kw}(?=\\s|$))`, "g"),
           "$1\n$2"
@@ -1416,15 +1450,10 @@ export default function Home() {
     // ── END NUCLEAR PRE-PASS ──────────────────────────────────────────────────
 
     // ── STRIP QUOTES FROM PIPE EDGE LABELS ───────────────────────────────────
-    // Mermaid pipe-label syntax |label| does NOT support double-quoted strings.
-    // The LLM sometimes emits: -.->|"«include»"| which crashes with 'got STR'.
-    // Strip the surrounding quotes: |"label"| → |label|
     clean = clean.replace(/\|"([^"]+)"\|/g, "|$1|");
     // ── END STRIP QUOTES FROM PIPE EDGE LABELS ───────────────────────────────
 
     // ── STRIP direction FROM INSIDE SUBGRAPHS ────────────────────────────────
-    // Top-level flowchart TD/LR controls all subgraph directions.
-    // "direction" inside a subgraph causes squash crashes — strip them.
     {
       const lines = clean.split("\n");
       let insideSubgraph = 0;
@@ -1439,70 +1468,10 @@ export default function Home() {
     }
     // ── END STRIP direction FROM INSIDE SUBGRAPHS ────────────────────────────
 
-    // ── REPLACE ALL classDef/class IN FLOWCHARTS WITH CLEAN BLOCK ────────────
-    // The LLM generates classDef lines with multi-line styles, squashed tokens,
-    // and invalid formatting that reliably crashes the Mermaid parser.
-    // Solution: strip ALL LLM-generated classDef and class lines, then append
-    // a single clean, guaranteed-valid style block at the end of the diagram.
-    {
-      const firstMeaningfulLine = clean
-        .split("\n")
-        .find(l => l.trim() && !l.trim().startsWith("%%"))
-        ?.trim()?.toLowerCase() || "";
-      const isFlowchart = firstMeaningfulLine.startsWith("flowchart") || firstMeaningfulLine.startsWith("graph ");
-      if (isFlowchart) {
-        // Strip ALL classDef and bare `class nodeId className` lines
-        const strippedLines = clean.split("\n").filter(l => {
-          const t = l.trim();
-          if (/^classDef\b/i.test(t)) return false;
-          if (/^class\s+\w+\s+\w+/i.test(t)) return false;
-          // Also strip "class nodeId fill:..." where classname+css are squashed (no separate classname token)
-          if (/^class\s+\w+\s+(?:fill|stroke|color|font)/i.test(t)) return false;
-          return true;
-        });
-        // Append clean, single-line classDef block
-        const cleanStyleBlock = [
-          "classDef service fill:#1a2540,stroke:#5b8df8,color:#e4eaf8,stroke-width:2px;",
-          "classDef database fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;",
-          "classDef external fill:#25183a,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;",
-          "classDef ui fill:#1a1e30,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;",
-          "classDef queue fill:#2a1a18,stroke:#f87171,color:#e4eaf8,stroke-width:2px;",
-          "classDef gateway fill:#0e1f28,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;",
-          "classDef process fill:#1a2035,stroke:#5b8df8,color:#e4eaf8,stroke-width:1px;",
-          "classDef actor fill:#0c1524,stroke:#3b82f6,color:#e4eaf8,stroke-width:2px;",
-          "classDef usecase fill:#1a2035,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;",
-          "classDef decision fill:#2a1a18,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;",
-          "classDef milestone fill:#0e1f28,stroke:#d4ff00,color:#e4eaf8,stroke-width:2px;",
-        ];
-        clean = [...strippedLines, ...cleanStyleBlock].join("\n");
-      }
-    }
-    // ── END REPLACE classDef/class IN FLOWCHARTS ──────────────────────────────
-
-    // ── SPLIT MULTI-NODE class ASSIGNMENTS ────────────────────────────────────
-    // "class nodeA nodeB service" → "class nodeA service\nclass nodeB service"
-    clean = clean.replace(
-      /^([ \t]*)class\s+(\w+(?:\s+\w+)+)\s+(\w+)\s*$/gm,
-      (_match, indent, ids, cls) =>
-        ids.trim().split(/\s+/).map((id: string) => `${indent}class ${id} ${cls}`).join("\n")
-    );
-    // ── END SPLIT MULTI-NODE class ASSIGNMENTS ────────────────────────────────
-
     // ── STRIP STYLE PROPERTIES FROM class ASSIGNMENT LINES ───────────────────
-    // "class nodeId actor fill:#0c1524,stroke:..." → "class nodeId actor"
     clean = clean.replace(
       /^([ \t]*class\s+\w+\s+\w+)\s+(?:fill|stroke|color|font)[^;\n]*/gm,
       "$1"
-    );
-    // ── STRIP ORPHANED KEYWORD+CSS LINES ──────────────────────────────────────
-    // When the squash pre-pass splits "flat_volume_nodeactor fill:#..." into:
-    //   flat_volume_node
-    //   actor fill:#0c1524,stroke:...
-    // the second line is an invalid statement. Strip any line that is a bare
-    // Mermaid classDef class name followed immediately by CSS properties.
-    clean = clean.replace(
-      /^[ \t]*(?:actor|service|database|external|ui|queue|gateway|process|usecase|decision|milestone)\s+(?:fill|stroke|color|font)[^;\n]*/gm,
-      ""
     );
     // "endactor" / "endclass" → "end\nactor" / "end\nclass"
     for (let i = 0; i < 5; i++) {
@@ -1510,89 +1479,13 @@ export default function Home() {
       clean = clean.replace(/\b(end)((?:actor|class|participant|note|section|title)\b)/gi, "$1\n$2");
       if (clean === prev) break;
     }
-    // ── END STRIP STYLE PROPERTIES FROM class ASSIGNMENT LINES ───────────────
-
-    // ── STRIP classDef/class FROM NON-FLOWCHART DIAGRAMS ─────────────────────
-    // classDef and class assignment statements are ONLY valid inside flowchart.
-    // When the LLM emits them inside erDiagram, sequenceDiagram, classDiagram,
-    // stateDiagram-v2, gantt, timeline, mindmap, or quadrantChart the lexer
-    // immediately crashes with "got ':'" or similar parse errors.
-    // Detect the first meaningful (non-comment) line and strip classDef/class
-    // from the entire code if it is a non-flowchart diagram.
-    {
-      const firstMeaningfulLine = clean
-        .split("\n")
-        .find(l => l.trim() && !l.trim().startsWith("%%"))
-        ?.trim()
-        ?.toLowerCase() || "";
-      const isFlowchartBase =
-        firstMeaningfulLine.startsWith("flowchart") ||
-        firstMeaningfulLine.startsWith("graph ");
-      if (!isFlowchartBase) {
-        // Pre-split: handle "endclassDef" squash (end + classDef on same token)
-        // so the per-line filter below can see the classDef line independently.
-        clean = clean.replace(/\b(end)(classDef)\b/gi, "$1\n$2");
-        // Also split any other word immediately followed by classDef (e.g. "nodeIdclassDef")
-        clean = clean.replace(/(\w)(classDef\s)/gi, "$1\n$2");
-        // Remove every line that starts with classDef or is a class assignment
-        clean = clean
-          .split("\n")
-          .filter(l => {
-            const t = l.trim();
-            // Remove: classDef name fill:... and class nodeId className
-            if (/^classDef\s+\w+/i.test(t)) return false;
-            // Remove bare `class nodeId someClass` lines (NOT inside classDiagram definitions)
-            // In classDiagram, class is followed by ClassName { not by nodeId classname
-            if (/^class\s+\w+\s+\w+$/i.test(t) && !firstMeaningfulLine.startsWith("classdiagram")) return false;
-            return true;
-          })
-          .join("\n");
-      }
-    }
-    // ── END STRIP classDef/class FROM NON-FLOWCHART DIAGRAMS ─────────────────
-
-    // ── JOIN BROKEN classDef LINES ────────────────────────────────────────────
-    // The LLM sometimes emits classDef style properties split across multiple
-    // lines, e.g.:
-    //   classDef actor fill:#0c1524,
-    //   stroke:#3b82f6,color:#e4eaf8;
-    // Mermaid requires all classDef properties on a SINGLE line. A classDef
-    // ending with a comma means the next line is a continuation — join them.
-    {
-      const joinedLines: string[] = [];
-      const ls = clean.split("\n");
-      for (let i = 0; i < ls.length; i++) {
-        const line = ls[i];
-        if (/^\s*classDef\s+\w+/i.test(line.trim()) && line.trimEnd().endsWith(",")) {
-          // Collect continuation lines until the style string is complete
-          let merged = line.trimEnd();
-          while (i + 1 < ls.length && !merged.trimEnd().endsWith(";") && ls[i + 1].trim() !== "" && !/^\s*(classDef|class|subgraph|end)\b/i.test(ls[i + 1])) {
-            i++;
-            merged = merged + ls[i].trim();
-          }
-          joinedLines.push(merged);
-        } else {
-          joinedLines.push(line);
-        }
-      }
-      clean = joinedLines.join("\n");
-    }
-    // ── END JOIN BROKEN classDef LINES ────────────────────────────────────────
+    // ── END STRIP STYLE PROPERTIES ───────────────────────────────────────────
 
     // ── STRIP INVALID NODE ATTRIBUTE BAGS ────────────────────────────────────
-    // Must run first — before any other pass — because the LLM sometimes emits
-    // non-existent Mermaid syntax like:
-    //   web_app["🌐 Web Application"]{class="ui", shape="round"}
-    // Mermaid's lexer treats `{` as DIAMOND_START and hard-crashes with:
-    //   "got 'DIAMOND_START'" parse error.
-    // These attribute bags are stripped entirely; correct class assignments
-    // are emitted as separate `class nodeId className` lines elsewhere.
     clean = clean.replace(/\{[^{}]*(?:class|shape|style|fill|stroke)[^{}]*\}/gi, "");
     // ── END STRIP INVALID NODE ATTRIBUTE BAGS ─────────────────────────────────
 
     // ── STEP 0: Direct keyword boundary injection ─────────────────────────────
-    // Targeted pre-pass: handle the specific crash pattern first
-    // "Xdirection TDKeyword(" — split at direction AND at any keyword following TD
     {
       const DIR_KW = [
         "Person_Ext", "System_Ext", "Container_Ext", "Component_Ext",
@@ -1601,7 +1494,7 @@ export default function Home() {
         "Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right",
         "Container", "Component", "Boundary",
         "Person", "System", "Rel",
-        "title", "subgraph", "classDef", "participant", "actor", "section",
+        "title", "subgraph", "participant", "actor", "section",
         "LAYOUT_WITH_LEGEND", "C4Context", "C4Container", "C4Component",
         "flowchart", "sequenceDiagram", "erDiagram", "classDiagram",
       ];
@@ -1683,7 +1576,6 @@ export default function Home() {
       /([^\n])(Rel\s*\()/g,
       /([^\n])(LAYOUT_WITH_LEGEND)/g,
       /([^\n])(subgraph\s)/g,
-      /([^\n])(classDef\s)/g,
       /([^\n])(participant\s)/g,
       /([^\n])(actor\s)/g,
       /([^\n])(title\s)/g,
@@ -1706,14 +1598,6 @@ export default function Home() {
 
     // Ensure `direction TD/LR/...` is isolated on its own line
     clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n])/gi, "$1\n$2");
-
-    // Strip orphaned classDef class-name+CSS lines produced by the actor/service/etc.
-    // keyword splits above. When "classDef actor fill:..." is split by ([^\n])(actor\s),
-    // "actor fill:#0c1524,..." ends up as a standalone invalid line. Strip it.
-    clean = clean.replace(
-      /^[ \t]*(?:actor|service|database|external|ui|queue|gateway|process|usecase|decision|milestone)\s+(?:fill|stroke|color|font)[^;\n]*/gm,
-      ""
-    );
 
     // ── END STEP 0 ───────────────────────────────────────────────────────────
 
@@ -1791,6 +1675,30 @@ export default function Home() {
 
     // Collapse excessive blank lines
     clean = clean.replace(/\n{3,}/g, "\n\n");
+
+    // ── RE-APPEND classDef style block + class assignments ───────────────────
+    // classDef/class lines were hoisted before all split passes to prevent
+    // keyword-split corruption. Re-append them now that splits are complete.
+    if (isFlowchartForHoist) {
+      const styleBlock = [
+        "classDef service fill:#1a2540,stroke:#5b8df8,color:#e4eaf8,stroke-width:2px;",
+        "classDef database fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;",
+        "classDef external fill:#25183a,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;",
+        "classDef ui fill:#1a1e30,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;",
+        "classDef queue fill:#2a1a18,stroke:#f87171,color:#e4eaf8,stroke-width:2px;",
+        "classDef gateway fill:#0e1f28,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;",
+        "classDef process fill:#1a2035,stroke:#5b8df8,color:#e4eaf8,stroke-width:1px;",
+        "classDef actor fill:#0c1524,stroke:#3b82f6,color:#e4eaf8,stroke-width:2px;",
+        "classDef usecase fill:#1a2035,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;",
+        "classDef decision fill:#2a1a18,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;",
+        "classDef milestone fill:#0e1f28,stroke:#d4ff00,color:#e4eaf8,stroke-width:2px;",
+      ];
+      const deduped = [...new Set(savedClassAssignments)];
+      clean = [clean.trim(), ...styleBlock, ...deduped].join("\n");
+      return clean;
+    }
+    // ── END RE-APPEND ─────────────────────────────────────────────────────────
+
     return clean.trim();
   };
 
@@ -1886,7 +1794,7 @@ export default function Home() {
       /([^\n])(Boundary\s*\()/g,
       /([^\n])(Person\s*\()/g, /([^\n])(System\s*\()/g, /([^\n])(Rel\s*\()/g,
       /([^\n])(LAYOUT_WITH_LEGEND)/g,
-      /([^\n])(subgraph\s)/g, /([^\n])(classDef\s)/g,
+      /([^\n])(subgraph\s)/g,
       /([^\n])(participant\s)/g, /([^\n])(actor\s)/g,
       /([^\n])(title\s)/g, /([^\n])(section\s)/g,
       // Sequence diagram: split squashed message lines
@@ -1896,10 +1804,43 @@ export default function Home() {
     const applyPatterns = (input: string): string => {
       let s = input;
 
+      // ── HOIST classDef/class LINES OUT BEFORE ANY SPLIT PASSES ──────────────
+      // classDef lines contain keywords like "actor", "service", "classDef" that
+      // appear in the nuclear split KW list. Running splits on classDef lines
+      // corrupts them (e.g. "classDef actor fill:..." → "classDef\nactor fill:...").
+      // Solution: extract classDef/class lines before all splits, re-append after.
+      const firstLineForHoist = s.split("\n").find(l => l.trim() && !l.trim().startsWith("%%"))?.trim()?.toLowerCase() || "";
+      const isFlowchartForHoist = firstLineForHoist.startsWith("flowchart") || firstLineForHoist.startsWith("graph ");
+      let savedClassAssignments: string[] = [];
+      if (isFlowchartForHoist) {
+        const bodyLines: string[] = [];
+        for (const line of s.split("\n")) {
+          const t = line.trim();
+          if (/^classDef\b/i.test(t)) continue; // strip – will re-append fresh block
+          if (/^class\s+\w+\s+\w+/i.test(t)) {
+            // Save clean assignment (strip any trailing CSS properties)
+            const clean = t.replace(/^(class\s+\w+\s+\w+)\s+(?:fill|stroke|color|font)[^;\n]*/i, "$1");
+            savedClassAssignments.push(clean);
+          } else {
+            bodyLines.push(line);
+          }
+        }
+        s = bodyLines.join("\n");
+      } else {
+        // Non-flowchart: strip all classDef/class entirely
+        s = s.split("\n").filter(l => {
+          const t = l.trim();
+          if (/^classDef\b/i.test(t)) return false;
+          if (/^class\s+\w+\s+\w+/i.test(t) && !firstLineForHoist.startsWith("classdiagram")) return false;
+          return true;
+        }).join("\n");
+      }
+      // ── END HOIST ───────────────────────────────────────────────────────────
+
       // ── NUCLEAR PRE-PASS: split ANY word squashed against Mermaid keywords ──
       {
         const KW = [
-          "classDef", "subgraph", "direction", "participant", "actor",
+          "subgraph", "direction", "participant", "actor",
           "section", "title", "end", "class", "note", "loop", "alt",
           "else", "opt", "par", "critical", "break", "rect",
         ];
@@ -1929,45 +1870,7 @@ export default function Home() {
         }).join("\n");
       }
 
-      // ── Strip and replace classDef/class ────────────────────────────────────
-      {
-        const firstLine = s.split("\n").find(l => l.trim() && !l.trim().startsWith("%%"))?.trim()?.toLowerCase() || "";
-        const isFlowchart = firstLine.startsWith("flowchart") || firstLine.startsWith("graph ");
-        if (isFlowchart) {
-          // Strip all LLM classDef/class lines; append clean guaranteed block
-          const stripped = s.split("\n").filter(l => {
-            const t = l.trim();
-            if (/^classDef\b/i.test(t)) return false;
-            if (/^class\s+\w+\s+\w+/i.test(t)) return false;
-            return true;
-          });
-          const styleBlock = [
-            "classDef service fill:#1a2540,stroke:#5b8df8,color:#e4eaf8,stroke-width:2px;",
-            "classDef database fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;",
-            "classDef external fill:#25183a,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;",
-            "classDef ui fill:#1a1e30,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;",
-            "classDef queue fill:#2a1a18,stroke:#f87171,color:#e4eaf8,stroke-width:2px;",
-            "classDef gateway fill:#0e1f28,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;",
-            "classDef process fill:#1a2035,stroke:#5b8df8,color:#e4eaf8,stroke-width:1px;",
-            "classDef actor fill:#0c1524,stroke:#3b82f6,color:#e4eaf8,stroke-width:2px;",
-            "classDef usecase fill:#1a2035,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;",
-            "classDef decision fill:#2a1a18,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;",
-            "classDef milestone fill:#0e1f28,stroke:#d4ff00,color:#e4eaf8,stroke-width:2px;",
-          ];
-          s = [...stripped, ...styleBlock].join("\n");
-        } else {
-          // Non-flowchart: strip all classDef/class
-          s = s.split("\n").filter(l => {
-            const t = l.trim();
-            if (/^classDef\b/i.test(t)) return false;
-            if (/^class\s+\w+\s+\w+/i.test(t) && !firstLine.startsWith("classdiagram")) return false;
-            return true;
-          }).join("\n");
-        }
-      }
-
-      // Strip style properties from class assignment lines & split end+keyword squash
-      s = s.replace(/^([ \t]*class\s+\w+\s+\w+)\s+(?:fill|stroke|color|font)[^;\n]*/gm, "$1");
+      // Split end+keyword squash
       for (let i = 0; i < 5; i++) {
         const prev = s;
         s = s.replace(/\b(end)((?:actor|class|participant|note|section|title)\b)/gi, "$1\n$2");
@@ -1994,7 +1897,7 @@ export default function Home() {
         "ContainerDb_Ext", "ContainerQueue_Ext", "System_Boundary", "Container_Boundary",
         "ContainerDb", "ContainerQueue", "Rel_Back", "Rel_Neighbor", "Rel_Up",
         "Rel_Down", "Rel_Left", "Rel_Right", "Container", "Component", "Boundary",
-        "Person", "System", "Rel", "title", "subgraph", "classDef", "participant",
+        "Person", "System", "Rel", "title", "subgraph", "participant",
         "actor", "section", "LAYOUT_WITH_LEGEND",
         "C4Context", "C4Container", "C4Component",
         "flowchart", "sequenceDiagram", "erDiagram", "classDiagram", "stateDiagram",
@@ -2020,13 +1923,6 @@ export default function Home() {
       }
       s = s.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n])/gi, (m, a, b) => a + "\n" + b);
       s = s.replace(/([^\n])\b(end)\b(\s*\n)/gi, (m, a, b, c) => a + "\nend\n");
-      // Strip orphaned classDef class-name+CSS lines produced when the keyword
-      // split patterns above split "classDef actor fill:..." into two lines.
-      // "actor fill:#0c1524,stroke:..." is an invalid standalone statement.
-      s = s.replace(
-        /^[ \t]*(?:actor|service|database|external|ui|queue|gateway|process|usecase|decision|milestone)\s+(?:fill|stroke|color|font)[^;\n]*/gm,
-        ""
-      );
       // ── NUCLEAR DIRECTION PASS (last resort before m.render) ─────────────────
       // Forcibly isolates any `direction TD/LR/...` still sandwiched on a line.
       s = s.replace(
@@ -2040,7 +1936,30 @@ export default function Home() {
         }
       );
       s = s.replace(/\n{3,}/g, "\n\n");
-      return ensureHeader(s.trim());
+      s = ensureHeader(s.trim());
+
+      // ── RE-APPEND classDef style block + class assignments ───────────────────
+      // classDef/class lines were hoisted out before all splits to prevent
+      // keyword-split corruption. Re-append them now that splits are done.
+      if (isFlowchartForHoist) {
+        const styleBlock = [
+          "classDef service fill:#1a2540,stroke:#5b8df8,color:#e4eaf8,stroke-width:2px;",
+          "classDef database fill:#1a2e2b,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;",
+          "classDef external fill:#25183a,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;",
+          "classDef ui fill:#1a1e30,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;",
+          "classDef queue fill:#2a1a18,stroke:#f87171,color:#e4eaf8,stroke-width:2px;",
+          "classDef gateway fill:#0e1f28,stroke:#38d9c0,color:#e4eaf8,stroke-width:2px;",
+          "classDef process fill:#1a2035,stroke:#5b8df8,color:#e4eaf8,stroke-width:1px;",
+          "classDef actor fill:#0c1524,stroke:#3b82f6,color:#e4eaf8,stroke-width:2px;",
+          "classDef usecase fill:#1a2035,stroke:#9d72ff,color:#e4eaf8,stroke-width:2px;",
+          "classDef decision fill:#2a1a18,stroke:#fbbf24,color:#e4eaf8,stroke-width:2px;",
+          "classDef milestone fill:#0e1f28,stroke:#d4ff00,color:#e4eaf8,stroke-width:2px;",
+        ];
+        const deduped = [...new Set(savedClassAssignments)];
+        s = [s, ...styleBlock, ...deduped].join("\n");
+      }
+
+      return s;
     };
 
     const finalCode = applyPatterns(cleanCode);
@@ -2078,10 +1997,10 @@ export default function Home() {
         return parts;
       }).join("\n");
 
-      // Stage 5: nuclear keyword split + classDef join
+      // Stage 5: nuclear keyword split
       {
         const KW5 = [
-          "classDef", "subgraph", "direction", "participant", "actor",
+          "subgraph", "direction", "participant", "actor",
           "section", "title", "end", "class", "note", "loop", "alt",
           "else", "opt", "par", "critical", "break", "rect",
         ];
