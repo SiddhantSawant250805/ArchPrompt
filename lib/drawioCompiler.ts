@@ -264,8 +264,9 @@ function compileSequenceDiagram(blueprint: any): string {
 
     const msgId = nextId();
     const msgStyle =
-      "edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#d4ff00;fontColor=#F0F0F0;" +
-      "exitX=0.5;exitY=0.5;entryX=0.5;entryY=0.5;" +
+      "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonal=1;jettySize=auto;html=1;" +
+      "strokeColor=#d4ff00;fontColor=#F0F0F0;fontSize=10;" +
+      "labelBackgroundColor=#0A0A0A;labelBorderColor=none;" +
       (edge.style === "dashed" ? "dashed=1;" : "");
     xml += `        <mxCell id="${msgId}" value="${escapeXml(edge.label || "")}" style="${msgStyle}" edge="1" parent="1" source="${srcBox}" target="${tgtBox}">\n`;
     xml += `          <mxGeometry relative="1" as="geometry">\n`;
@@ -1308,7 +1309,10 @@ function compileArchimateView(blueprint: any): string {
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from];
     const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     const eStyle = `edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#9d72ff;fontColor=#e4eaf8;fontSize=10;` +
       (edge.style === "dashed" ? "dashed=1;" : "");
@@ -1382,7 +1386,10 @@ function compileBpmnDiagram(blueprint: any): string {
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from];
     const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     const eStyle = `edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#5b8df8;fontColor=#e4eaf8;fontSize=10;` +
       (edge.style === "dashed" ? "dashed=1;" : "");
@@ -1439,7 +1446,10 @@ function compileDfdDiagram(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     const eStyle = `edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#5b8df8;fontColor=#e4eaf8;fontSize=10;`;
     xml += `        <mxCell id="${eid}" value="${escapeXml(edge.label || "")}" style="${eStyle}" edge="1" parent="1" source="${srcId}" target="${tgtId}">\n`;
@@ -1486,7 +1496,10 @@ function compileVsmDiagram(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     const eStyle = `edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#5b8df8;fontColor=#e4eaf8;fontSize=10;` +
       (edge.style === "dashed" ? "dashed=1;" : "");
@@ -1554,7 +1567,10 @@ function compileCapabilityMap(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     xml += `        <mxCell id="${eid}" value="${escapeXml(edge.label || "")}" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#5b8df8;fontColor=#e4eaf8;fontSize=10;" edge="1" parent="1" source="${srcId}" target="${tgtId}">\n`;
     xml += `          <mxGeometry relative="1" as="geometry"/>\n`;
@@ -1625,7 +1641,10 @@ function compileNetworkTopology(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     xml += `        <mxCell id="${eid}" value="${escapeXml(edge.label || "")}" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#38d9c0;fontColor=#e4eaf8;fontSize=10;" edge="1" parent="1" source="${srcId}" target="${tgtId}">\n`;
     xml += `          <mxGeometry relative="1" as="geometry"/>\n`;
@@ -1686,7 +1705,10 @@ function compileDeploymentDiagram(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     const eStyle = `edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#38d9c0;fontColor=#e4eaf8;fontSize=10;` +
       (edge.style === "dashed" ? "dashed=1;" : "");
@@ -1752,7 +1774,10 @@ function compileComponentDiagram(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     const eStyle = `edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#5b8df8;fontColor=#e4eaf8;fontSize=10;` +
       (edge.style === "dashed" ? "dashed=1;" : "");
@@ -1821,7 +1846,10 @@ function compileUseCaseDiagram(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     const eStyle = `edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#9d72ff;fontColor=#e4eaf8;fontSize=10;dashed=1;`;
     xml += `        <mxCell id="${eid}" value="${escapeXml(edge.label || "")}" style="${eStyle}" edge="1" parent="1" source="${srcId}" target="${tgtId}">\n`;
@@ -1882,7 +1910,10 @@ function compileActivityDiagram(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     xml += `        <mxCell id="${eid}" value="${escapeXml(edge.label || "")}" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#5b8df8;fontColor=#e4eaf8;fontSize=10;" edge="1" parent="1" source="${srcId}" target="${tgtId}">\n`;
     xml += `          <mxGeometry relative="1" as="geometry"/>\n`;
@@ -1925,7 +1956,10 @@ function compileCommunicationDiagram(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     xml += `        <mxCell id="${eid}" value="${escapeXml(edge.label || "")}" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#d4ff00;fontColor=#e4eaf8;fontSize=10;" edge="1" parent="1" source="${srcId}" target="${tgtId}">\n`;
     xml += `          <mxGeometry relative="1" as="geometry"/>\n`;
@@ -1986,7 +2020,10 @@ function compilePackageDiagram(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     const eStyle = `edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#9d72ff;fontColor=#e4eaf8;fontSize=10;dashed=1;`;
     xml += `        <mxCell id="${eid}" value="${escapeXml(edge.label || "")}" style="${eStyle}" edge="1" parent="1" source="${srcId}" target="${tgtId}">\n`;
@@ -2030,7 +2067,10 @@ function compileObjectDiagram(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     const eStyle = `edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#38d9c0;fontColor=#e4eaf8;fontSize=10;` +
       (edge.style === "dashed" ? "dashed=1;" : "");
@@ -2089,7 +2129,10 @@ function compileTimingDiagram(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     xml += `        <mxCell id="${eid}" value="${escapeXml(edge.label || "")}" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#38d9c0;fontColor=#e4eaf8;fontSize=10;dashed=1;" edge="1" parent="1" source="${srcId}" target="${tgtId}">\n`;
     xml += `          <mxGeometry relative="1" as="geometry"/>\n`;
@@ -2135,7 +2178,10 @@ function compileInteractionOverview(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     const eStyle = `edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#9d72ff;fontColor=#e4eaf8;fontSize=10;` +
       (edge.style === "dashed" ? "dashed=1;" : "");
@@ -2207,7 +2253,10 @@ function compileItRoadmap(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     xml += `        <mxCell id="${eid}" value="${escapeXml(edge.label || "")}" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#5b8df8;fontColor=#e4eaf8;fontSize=10;" edge="1" parent="1" source="${srcId}" target="${tgtId}">\n`;
     xml += `          <mxGeometry relative="1" as="geometry"/>\n`;
@@ -2268,7 +2317,10 @@ function compileServiceBlueprint(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     const eStyle = `edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#5b8df8;fontColor=#e4eaf8;fontSize=10;` +
       (edge.style === "dashed" ? "dashed=1;" : "");
@@ -2372,7 +2424,10 @@ function compileSwimlaneDiagram(blueprint: any): string {
 
   edges.forEach((edge) => {
     const srcId = cellMap[edge.from]; const tgtId = cellMap[edge.to];
-    if (!srcId || !tgtId) return;
+    if (!srcId || !tgtId) {
+      console.warn(`[drawioCompiler] Edge skipped — node ID not in cellMap. from="${edge.from}" (${srcId ? "ok" : "MISSING"}) to="${edge.to}" (${tgtId ? "ok" : "MISSING"})`);
+      return;
+    }
     const eid = nextId();
     const eStyle = `edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#d4ff00;fontColor=#e4eaf8;fontSize=10;` +
       (edge.style === "dashed" ? "dashed=1;" : "");

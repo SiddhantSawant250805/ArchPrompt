@@ -406,7 +406,32 @@ export default function Home() {
         );
       }, 1500);
     } else {
+      // Iframe not yet initialised — poll every 300 ms until it is ready (max 20 attempts = 6 s).
+      // The init handler also sends the XML unconditionally, so this is a belt-and-suspenders
+      // guard for the case where init fires slightly before this interval checks.
       setDrawioStatus("loading");
+      let waitCount = 0;
+      drawioRetryRef.current = setInterval(() => {
+        waitCount++;
+        if (drawioReadyRef.current) {
+          // Iframe ready now — send and stop polling.
+          clearInterval(drawioRetryRef.current!);
+          drawioRetryRef.current = null;
+          console.log(`[loadDrawioXml] Iframe became ready after ${waitCount} poll(s) — sending XML`);
+          iframeRef.current?.contentWindow?.postMessage(
+            JSON.stringify({ action: "load", xml: drawioXmlRef.current, autosave: 1 }),
+            "*"
+          );
+          setDrawioStatus("loaded");
+          return;
+        }
+        if (waitCount >= 20) {
+          // Give up after 6 s — the init handler will send the XML when it eventually fires.
+          clearInterval(drawioRetryRef.current!);
+          drawioRetryRef.current = null;
+          console.warn("[loadDrawioXml] Timed out waiting for iframe init — relying on init handler");
+        }
+      }, 300);
     }
   }, []);
 
@@ -471,7 +496,7 @@ export default function Home() {
         startOnLoad: false,
         theme: "dark",
         securityLevel: "loose",
-        flowchart: { useMaxWidth: false, htmlLabels: true },
+        flowchart: { useMaxWidth: false, htmlLabels: true, curve: "linear" },
       });
     }
   };
@@ -863,7 +888,8 @@ export default function Home() {
         throw new Error(errMsg);
       }
 
-      const { code } = await s2Res.json();
+      const { code, provider: s2Provider } = await s2Res.json();
+      if (s2Provider) setActiveProvider(s2Provider);
       setMermaidCode(code);
 
       // Render the Mermaid SVG client side
@@ -875,14 +901,13 @@ export default function Home() {
 
       let drawioDataXML: string | null = null;
 
-      // All diagram types now compile to native draw.io XML via compileBlueprintToDrawio
       if (compilerMethod === "visual" || compilerMethod === "deterministic") {
         try {
           const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
           drawioDataXML = xml;
           loadDrawioXml(xml);
         } catch (localErr: any) {
-          // fallback to server
+          // fallback to server-side AI compiler
           const fallbackRes = await fetch("/api/generate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -893,19 +918,19 @@ export default function Home() {
             drawioDataXML = xml;
             loadDrawioXml(xml);
           } else {
-            // Fallback to universal visual SVG wrapper
-            if (renderedSvg || canvasSvg) {
-              const xml = compileSvgToDrawioXml(renderedSvg || canvasSvg);
+            // Last resort: re-try local compiler (may succeed on second attempt for transient errors)
+            try {
+              const xml = compileBlueprintToDrawio(targetBlueprint, undefined, resolvedLogos);
               drawioDataXML = xml;
               loadDrawioXml(xml);
-            } else {
+            } catch {
               setDrawioStatus("error");
               setDrawioError("Failed to compile diagram for editor.");
             }
           }
         }
       } else {
-        // Gemini server
+        // Gemini server compiler
         const serverRes = await fetch("/api/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -916,20 +941,14 @@ export default function Home() {
           drawioDataXML = xml;
           loadDrawioXml(xml);
         } else {
+          // Fallback to local deterministic compiler
           try {
             const xml = compileBlueprintToDrawio(targetBlueprint, renderedSvg || canvasSvg || undefined, resolvedLogos);
             drawioDataXML = xml;
             loadDrawioXml(xml);
           } catch (err: any) {
-            // Fallback to universal visual SVG wrapper
-            if (renderedSvg || canvasSvg) {
-              const xml = compileSvgToDrawioXml(renderedSvg || canvasSvg);
-              drawioDataXML = xml;
-              loadDrawioXml(xml);
-            } else {
-              setDrawioStatus("error");
-              setDrawioError(err.message || "Failed to generate diagram for editor.");
-            }
+            setDrawioStatus("error");
+            setDrawioError(err.message || "Failed to generate diagram for editor.");
           }
         }
       }
@@ -1016,10 +1035,9 @@ export default function Home() {
         throw new Error(errMsg);
       }
 
-      const { blueprint } = await s1Res.json();
+      const { blueprint, provider: s1Provider } = await s1Res.json();
+      if (s1Provider) setActiveProvider(s1Provider);
       setLastBlueprint(blueprint);
-
-      // Run Stages 2 and 3 modularly
       await compileBlueprintToDiagrams(blueprint, currentPrompt);
       setPromptInput("");
       setSelectedFile(null);
@@ -1391,6 +1409,33 @@ export default function Home() {
     // Normalize line endings
     let clean = code.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
+    // ── STRIP title LINES FROM C4/SEQUENCE/ER/CLASS/STATE DIAGRAMS ──────────
+    // `title` is only valid in gantt/timeline. In all other diagram types the
+    // LLM frequently squashes it with the next statement, causing hard crashes.
+    // Strip title lines (keeping any glued-on statement remainder) universally
+    // for non-gantt/timeline diagrams.
+    {
+      const firstForTitle = clean
+        .split("\n")
+        .find(l => l.trim() && !l.trim().startsWith("%%"))
+        ?.trim()?.toLowerCase() || "";
+      const isTitleSafe = firstForTitle.startsWith("gantt") || firstForTitle.startsWith("timeline");
+      if (!isTitleSafe) {
+        const GLUE_RE = /(direction\s+(?:TD|LR|TB|BT|RL)|Person\s*\(|System\s*\(|Container\s*\(|Component\s*\(|Rel\s*\(|Boundary\s*\(|C4Context\b|C4Container\b|C4Component\b|flowchart\s|sequenceDiagram\b|erDiagram\b|classDiagram\b|subgraph\s)/i;
+        clean = clean
+          .split("\n")
+          .flatMap(line => {
+            const t = line.trim();
+            if (!/^title\s/i.test(t)) return [line];
+            const m = t.match(GLUE_RE);
+            if (m && m.index && m.index > 0) return [t.slice(m.index).trim()];
+            return [];
+          })
+          .join("\n");
+      }
+    }
+    // ── END STRIP title LINES ────────────────────────────────────────────────
+
     // ── HOIST classDef/class LINES OUT BEFORE ANY SPLIT PASSES ──────────────
     // classDef lines contain keywords ("actor", "classDef", etc.) that appear in
     // the nuclear split KW list. Running splits on classDef lines corrupts them
@@ -1432,6 +1477,7 @@ export default function Home() {
     // ── NUCLEAR PRE-PASS: split ANY word squashed against Mermaid keywords ────
     // Handles: "endsubgraph", "transfer_fundsactor", "nodeIdsubgraph", etc.
     // classDef is intentionally omitted — classDef lines were hoisted out above.
+    // Quote-aware: skip splits that fall inside a node label string.
     const SQUASH_KEYWORDS = [
       "subgraph", "direction", "participant", "actor",
       "section", "title", "end", "class", "note", "loop", "alt",
@@ -1440,10 +1486,14 @@ export default function Home() {
     for (let i = 0; i < 5; i++) {
       const prev = clean;
       for (const kw of SQUASH_KEYWORDS) {
-        clean = clean.replace(
-          new RegExp(`([a-zA-Z0-9_])(${kw}(?=\\s|$))`, "g"),
-          "$1\n$2"
-        );
+        clean = clean
+          .split("\n")
+          .map(line => {
+            // Skip classDef lines entirely — they were hoisted out and must not be split
+            if (/^\s*classDef\b/i.test(line.trim())) return line;
+            return splitKeywordOutsideQuotes(line, kw);
+          })
+          .join("\n");
       }
       if (clean === prev) break;
     }
@@ -1453,18 +1503,26 @@ export default function Home() {
     clean = clean.replace(/\|"([^"]+)"\|/g, "|$1|");
     // ── END STRIP QUOTES FROM PIPE EDGE LABELS ───────────────────────────────
 
-    // ── STRIP direction FROM INSIDE SUBGRAPHS ────────────────────────────────
+    // ── STRIP direction FROM INSIDE SUBGRAPHS (flowchart only) ───────────────
+    // Only apply this pass to flowchart/graph diagrams. For all other diagram
+    // types (C4, sequence, ER, class, state, ArchiMate, etc.) `direction` is
+    // a valid top-level statement and must NOT be stripped.
     {
-      const lines = clean.split("\n");
-      let insideSubgraph = 0;
-      const filtered = lines.filter(line => {
-        const t = line.trim();
-        if (/^subgraph\b/i.test(t)) { insideSubgraph++; return true; }
-        if (/^end\s*$/i.test(t) && insideSubgraph > 0) { insideSubgraph--; return true; }
-        if (insideSubgraph > 0 && /^direction\s+(?:TD|LR|TB|BT|RL)\s*$/i.test(t)) return false;
-        return true;
-      });
-      clean = filtered.join("\n");
+      const isFlowchartForDirStrip =
+        firstMeaningfulLineForHoist.startsWith("flowchart") ||
+        firstMeaningfulLineForHoist.startsWith("graph ");
+      if (isFlowchartForDirStrip) {
+        const lines = clean.split("\n");
+        let insideSubgraph = 0;
+        const filtered = lines.filter(line => {
+          const t = line.trim();
+          if (/^subgraph\b/i.test(t)) { insideSubgraph++; return true; }
+          if (/^end\s*$/i.test(t) && insideSubgraph > 0) { insideSubgraph--; return true; }
+          if (insideSubgraph > 0 && /^direction\s+(?:TD|LR|TB|BT|RL)\s*$/i.test(t)) return false;
+          return true;
+        });
+        clean = filtered.join("\n");
+      }
     }
     // ── END STRIP direction FROM INSIDE SUBGRAPHS ────────────────────────────
 
@@ -1695,10 +1753,14 @@ export default function Home() {
       ];
       const deduped = [...new Set(savedClassAssignments)];
       clean = [clean.trim(), ...styleBlock, ...deduped].join("\n");
+      // Safety net: strip any lingering placeholders
+      clean = clean.split("\n").filter(line => line.trim() !== "__TITLE_PLACEHOLDER__").join("\n");
       return clean;
     }
     // ── END RE-APPEND ─────────────────────────────────────────────────────────
 
+    // Safety net: strip any lingering placeholders
+    clean = clean.split("\n").filter(line => line.trim() !== "__TITLE_PLACEHOLDER__").join("\n");
     return clean.trim();
   };
 
@@ -1762,6 +1824,38 @@ export default function Home() {
     return { isValid: true };
   };
 
+  /**
+   * Returns true if position `pos` in `line` is inside a double-quoted string.
+   * Used by the quote-aware nuclear keyword split to avoid corrupting node labels.
+   */
+  const isInsideQuotes = (line: string, pos: number): boolean => {
+    let inside = false;
+    for (let i = 0; i < pos; i++) {
+      if (line[i] === '"') inside = !inside;
+    }
+    return inside;
+  };
+
+  /**
+   * Split `kw` out of `line` only when the match position is NOT inside double-quoted text.
+   * Replaces the naive `line.replace(regex, "$1\n$2")` pattern used in nuclear passes.
+   */
+  const splitKeywordOutsideQuotes = (line: string, kw: string): string => {
+    const re = new RegExp(`([a-zA-Z0-9_])(${kw}(?=\\s|$))`, "g");
+    let result = "";
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(line)) !== null) {
+      const matchStart = match.index;
+      if (!isInsideQuotes(line, matchStart)) {
+        result += line.slice(lastIndex, matchStart + 1) + "\n";
+        lastIndex = matchStart + 1;
+      }
+    }
+    result += line.slice(lastIndex);
+    return result;
+  };
+
   const renderMermaidMarkup = async (code: string): Promise<string | null> => {
     if (typeof window === "undefined" || !(window as any).mermaid) {
       setCanvasError("Mermaid.js CDN library is not loaded onto browser.");
@@ -1804,6 +1898,25 @@ export default function Home() {
     const applyPatterns = (input: string): string => {
       let s = input;
 
+      // ── STRIP title LINES (non-gantt/timeline diagrams) ─────────────────────
+      // Same logic as sanitizeMermaidCode — strip title lines to prevent
+      // squash crashes. Also handle glued-on statements in the title line.
+      {
+        const firstForTitle = s.split("\n").find(l => l.trim() && !l.trim().startsWith("%%"))?.trim()?.toLowerCase() || "";
+        const isTitleSafe = firstForTitle.startsWith("gantt") || firstForTitle.startsWith("timeline");
+        if (!isTitleSafe) {
+          const GLUE_RE = /(direction\s+(?:TD|LR|TB|BT|RL)|Person\s*\(|System\s*\(|Container\s*\(|Component\s*\(|Rel\s*\(|Boundary\s*\(|C4Context\b|C4Container\b|C4Component\b|flowchart\s|sequenceDiagram\b|erDiagram\b|classDiagram\b|subgraph\s)/i;
+          s = s.split("\n").flatMap(line => {
+            const t = line.trim();
+            if (!/^title\s/i.test(t)) return [line];
+            const m = t.match(GLUE_RE);
+            if (m && m.index && m.index > 0) return [t.slice(m.index).trim()];
+            return [];
+          }).join("\n");
+        }
+      }
+      // ── END STRIP title LINES ─────────────────────────────────────────────
+
       // ── HOIST classDef/class LINES OUT BEFORE ANY SPLIT PASSES ──────────────
       // classDef lines contain keywords like "actor", "service", "classDef" that
       // appear in the nuclear split KW list. Running splits on classDef lines
@@ -1838,6 +1951,7 @@ export default function Home() {
       // ── END HOIST ───────────────────────────────────────────────────────────
 
       // ── NUCLEAR PRE-PASS: split ANY word squashed against Mermaid keywords ──
+      // Quote-aware: skip splits that fall inside a node label string.
       {
         const KW = [
           "subgraph", "direction", "participant", "actor",
@@ -1847,7 +1961,14 @@ export default function Home() {
         for (let i = 0; i < 5; i++) {
           const prev = s;
           for (const kw of KW) {
-            s = s.replace(new RegExp(`([a-zA-Z0-9_])(${kw}(?=\\s|$))`, "g"), "$1\n$2");
+            s = s
+              .split("\n")
+              .map(line => {
+                // Skip classDef lines — they were hoisted and must not be split
+                if (/^\s*classDef\b/i.test(line.trim())) return line;
+                return splitKeywordOutsideQuotes(line, kw);
+              })
+              .join("\n");
           }
           if (s === prev) break;
         }
@@ -1857,17 +1978,22 @@ export default function Home() {
       // Strip double-quoted pipe labels: |"label"| → |label|
       s = s.replace(/\|"([^"]+)"\|/g, "|$1|");
 
-      // Strip direction lines inside subgraphs
+      // Strip direction lines inside subgraphs (flowchart/graph diagrams only)
       {
-        const lines = s.split("\n");
-        let depth = 0;
-        s = lines.filter(line => {
-          const t = line.trim();
-          if (/^subgraph\b/i.test(t)) { depth++; return true; }
-          if (/^end\s*$/i.test(t) && depth > 0) { depth--; return true; }
-          if (depth > 0 && /^direction\s+(?:TD|LR|TB|BT|RL)\s*$/i.test(t)) return false;
-          return true;
-        }).join("\n");
+        const isFlowchartForDirStrip =
+          firstLineForHoist.startsWith("flowchart") ||
+          firstLineForHoist.startsWith("graph ");
+        if (isFlowchartForDirStrip) {
+          const lines = s.split("\n");
+          let depth = 0;
+          s = lines.filter(line => {
+            const t = line.trim();
+            if (/^subgraph\b/i.test(t)) { depth++; return true; }
+            if (/^end\s*$/i.test(t) && depth > 0) { depth--; return true; }
+            if (depth > 0 && /^direction\s+(?:TD|LR|TB|BT|RL)\s*$/i.test(t)) return false;
+            return true;
+          }).join("\n");
+        }
       }
 
       // Split end+keyword squash
@@ -1959,6 +2085,9 @@ export default function Home() {
         s = [s, ...styleBlock, ...deduped].join("\n");
       }
 
+      // Safety net: strip any lingering __TITLE_PLACEHOLDER__ lines
+      s = s.split("\n").filter(line => line.trim() !== "__TITLE_PLACEHOLDER__").join("\n");
+
       return s;
     };
 
@@ -1997,8 +2126,25 @@ export default function Home() {
         return parts;
       }).join("\n");
 
-      // Stage 5: nuclear keyword split
+      // Stage 5: nuclear keyword split — with classDef hoist and quote-awareness
+      // First, hoist classDef/class lines out of the body so the nuclear split
+      // doesn't corrupt them (e.g. "classDef actor fill:..." → "classDef\nactor fill:...").
       {
+        const firstLineFP = s.split("\n").find(l => l.trim() && !l.trim().startsWith("%%"))?.trim()?.toLowerCase() || "";
+        const isFlowchartFP = firstLineFP.startsWith("flowchart") || firstLineFP.startsWith("graph ");
+        let savedClassDefsFP: string[] = [];
+        let savedClassAssignsFP: string[] = [];
+        if (isFlowchartFP) {
+          const bodyLines: string[] = [];
+          for (const line of s.split("\n")) {
+            const t = line.trim();
+            if (/^classDef\b/i.test(t)) { savedClassDefsFP.push(line); continue; }
+            if (/^class\s+\w+\s+\w+/i.test(t)) { savedClassAssignsFP.push(line); continue; }
+            bodyLines.push(line);
+          }
+          s = bodyLines.join("\n");
+        }
+
         const KW5 = [
           "subgraph", "direction", "participant", "actor",
           "section", "title", "end", "class", "note", "loop", "alt",
@@ -2007,9 +2153,20 @@ export default function Home() {
         for (let pass = 0; pass < 5; pass++) {
           const prev = s;
           for (const kw of KW5) {
-            s = s.replace(new RegExp(`([a-zA-Z0-9_])(${kw}(?=\\s|$))`, "g"), "$1\n$2");
+            s = s
+              .split("\n")
+              .map(line => {
+                if (/^\s*classDef\b/i.test(line.trim())) return line;
+                return splitKeywordOutsideQuotes(line, kw);
+              })
+              .join("\n");
           }
           if (s === prev) break;
+        }
+
+        // Re-append hoisted classDef/class lines after the splits
+        if (isFlowchartFP && (savedClassDefsFP.length > 0 || savedClassAssignsFP.length > 0)) {
+          s = [s.trimEnd(), ...savedClassDefsFP, ...savedClassAssignsFP].join("\n");
         }
       }
       {
@@ -2045,6 +2202,24 @@ export default function Home() {
         "$1$2\n$3"
       );
 
+      // ── Final title strip: catch any title lines that survived earlier passes ─
+      {
+        const firstFinal = s.split("\n").find(l => l.trim() && !l.trim().startsWith("%%"))?.trim()?.toLowerCase() || "";
+        const isTitleSafeFinal = firstFinal.startsWith("gantt") || firstFinal.startsWith("timeline");
+        if (!isTitleSafeFinal) {
+          const GLUE_RE = /(direction\s+(?:TD|LR|TB|BT|RL)|Person\s*\(|System\s*\(|Container\s*\(|Component\s*\(|Rel\s*\(|Boundary\s*\(|C4Context\b|C4Container\b|C4Component\b|flowchart\s|sequenceDiagram\b|erDiagram\b|classDiagram\b|subgraph\s)/i;
+          s = s.split("\n").flatMap(line => {
+            const t = line.trim();
+            if (!/^title\s/i.test(t)) return [line];
+            const m2 = t.match(GLUE_RE);
+            if (m2 && m2.index && m2.index > 0) return [t.slice(m2.index).trim()];
+            return [];
+          }).join("\n");
+        }
+      }
+      // Safety net: strip any lingering __TITLE_PLACEHOLDER__ lines
+      s = s.split("\n").filter(line => line.trim() !== "__TITLE_PLACEHOLDER__").join("\n");
+
       return s;
     };
     // ── END applyFinalPasses ──────────────────────────────────────────────────
@@ -2077,6 +2252,39 @@ export default function Home() {
           return svg;
         } catch (repairErr: any) {
           console.error("[renderMermaidMarkup] Repair also failed:", repairErr);
+
+          // ── 4D: Server-side Stage 2 re-call before fallback ────────────────────
+          // Before rendering a placeholder, try a targeted server-side re-generation
+          // with the specific parse error as context, so the model can correct its output.
+          try {
+            console.warn("[renderMermaidMarkup] Attempting server-side Stage 2 re-generation with error context...");
+            const recoveryRes = await fetch("/api/generate", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                stage: 2,
+                blueprint: lastBlueprint,
+                errorContext: repairErr.message || String(repairErr),
+              }),
+            });
+            if (recoveryRes.ok) {
+              const { code: recoveredRaw } = await recoveryRes.json();
+              const cleanedRecovery = sanitizeMermaidCode(recoveredRaw);
+              const recoveryRenderId = "mermaid-render-recovery-" + Math.random().toString(36).substring(2, 9);
+              const { svg: recoverySvg } = await m.render(recoveryRenderId, cleanedRecovery);
+              // Recovery succeeded — update state and skip the error banner
+              setMermaidCode(cleanedRecovery);
+              setCanvasSvg(recoverySvg);
+              setCanvasError(null);
+              setTimeout(() => { autoFitDiagramView(); }, 50);
+              return recoverySvg;
+            }
+          } catch (recoveryErr: any) {
+            console.error("[renderMermaidMarkup] Server re-call also failed:", recoveryErr);
+            // Fall through to placeholder render below
+          }
+          // ── END 4D ─────────────────────────────────────────────────────────────
+
           // ── Fallback: render a minimal valid diagram instead of showing error ──
           try {
             const fallbackId = "mermaid-render-fallback-" + Math.random().toString(36).substring(2, 9);
@@ -2162,7 +2370,17 @@ export default function Home() {
     setMermaidCode(customCode);
     const renderedSvg = await renderMermaidMarkup(customCode);
     if (renderedSvg) {
-      const xml = compileSvgToDrawioXml(renderedSvg);
+      // Use the blueprint compiler for structural parity — fall back to SVG image only if no blueprint exists
+      let xml: string;
+      if (lastBlueprint) {
+        try {
+          xml = compileBlueprintToDrawio(lastBlueprint, renderedSvg, resolvedLogos);
+        } catch {
+          xml = compileSvgToDrawioXml(renderedSvg);
+        }
+      } else {
+        xml = compileSvgToDrawioXml(renderedSvg);
+      }
       setDrawioXML(xml);
       loadDrawioXml(xml);
       if (activeApplicationId) {
@@ -2325,12 +2543,11 @@ export default function Home() {
       try {
         if (app.blueprint) {
           drawioXml = compileBlueprintToDrawio(app.blueprint, renderedSvg || undefined, resolvedLogos);
+        } else {
+          console.warn("[handleLoadApplication] No blueprint available for structural compile.");
         }
       } catch (err) {
-        console.warn("[handleLoadApplication] Blueprint compile failed, falling back to SVG compile", err);
-      }
-      if (!drawioXml && renderedSvg) {
-        drawioXml = compileSvgToDrawioXml(renderedSvg);
+        console.warn("[handleLoadApplication] Blueprint compile failed:", err);
       }
       if (drawioXml) {
         // Persist the compiled XML so subsequent loads are instant
@@ -2508,14 +2725,12 @@ export default function Home() {
       try {
         if (entry.blueprint) {
           drawioXml = compileBlueprintToDrawio(entry.blueprint, renderedSvg || undefined, resolvedLogos);
-        } else if (renderedSvg) {
-          drawioXml = compileSvgToDrawioXml(renderedSvg);
+        } else {
+          // No blueprint — nothing we can do structurally
+          console.warn("[handleRestoreHistory] No blueprint available for structural compile.");
         }
       } catch (err) {
-        console.warn("Failed blueprint compile on history load, falling back to visual SVG compile", err);
-        if (renderedSvg) {
-          drawioXml = compileSvgToDrawioXml(renderedSvg);
-        }
+        console.warn("Failed blueprint compile on history load:", err);
       }
 
       if (drawioXml) {
@@ -3204,9 +3419,16 @@ export default function Home() {
           {/* Pipeline execution progress checklist */}
           {loading && (
             <div className="bg-white/5 border border-white/10 rounded-xl p-3.5 space-y-3.5">
-              <span className="text-[9px] font-medium text-[#999999]/60 block tracking-wider uppercase">
-                Active Compiler Engine Tasks
-              </span>
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] font-medium text-[#999999]/60 block tracking-wider uppercase">
+                  Active Compiler Engine Tasks
+                </span>
+                {activeProvider && (
+                  <span className="text-[9px] font-mono text-[#d4ff00]/70 bg-[#d4ff00]/5 border border-[#d4ff00]/15 rounded px-1.5 py-0.5 max-w-[120px] truncate" title={activeProvider}>
+                    {activeProvider}
+                  </span>
+                )}
+              </div>
               <div className="space-y-2.5">
                 <div className="flex items-center gap-3 text-xs">
                   <div className={`h-4 w-4 rounded-full flex items-center justify-center text-[10px] font-bold ${pipelineStage >= 1 ? "bg-[#d4ff00]/15 text-[#d4ff00] border border-[#d4ff00]/25" : "bg-white/5 text-[#999999]"}`}>

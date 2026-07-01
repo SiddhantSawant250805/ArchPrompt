@@ -19,7 +19,7 @@ const ai = GEMINI_API_KEY && GEMINI_API_KEY !== "your-gemini-api-key-here"
     })
   : null;
 
-const DEFAULT_MODEL = "gemini-3.5-flash";
+const DEFAULT_MODEL = "gemini-2.5-flash";
 
 // ----------------------------------------------------
 // SYSTEM PROMPTS & SCHEMAS
@@ -278,7 +278,7 @@ Every node ID must be unique. Every edge from/to must reference a declared node 
 
 GUIDELINES BY KIND:
 - flowchart:
-  First line MUST be: %%{init: {"theme": "dark", "flowchart": {"curve": "stepBefore"}}}%%
+  First line MUST be: %%{init: {"theme": "dark", "flowchart": {"curve": "linear"}}}%%
   Second line: flowchart ${direction}
   (These two lines are the ONLY lines that go on the flowchart declaration — nothing else.)
   Shape syntax: rect=id["L"], round=id("L"), diamond=id{"L"}, cylinder=id[("L")], hexagon=id{{"L"}}, stadium=id(["L"])
@@ -289,7 +289,7 @@ GUIDELINES BY KIND:
   Assign class names only: class nodeId service (each on its own line, after all edges)
 
   EXACT OUTPUT FORMAT (every statement on its own line, no exceptions):
-  %%{init: {"theme": "dark", "flowchart": {"curve": "stepBefore"}}}%%
+  %%{init: {"theme": "dark", "flowchart": {"curve": "linear"}}}%%
   flowchart TD
   subgraph group_web ["🌐 Web Layer"]
   web_client["🖥️ Web Client"]
@@ -374,7 +374,7 @@ GUIDELINES BY KIND:
   NO classDef. NO class statements.
 
 - bpmn:
-  First line: %%{init: {"theme": "dark", "flowchart": {"curve": "stepBefore"}}}%%
+  First line: %%{init: {"theme": "dark", "flowchart": {"curve": "linear"}}}%%
   Second line: flowchart TD
   Use subgraph per pool/lane. Tasks=rect nodes, Gateways=diamond nodes, Start events=stadium nodes (🟢 prefix), End events=hexagon nodes (🔴 prefix).
   Inter-pool message flows use dashed edges.
@@ -525,6 +525,44 @@ function sanitizeContent(text: string): string {
 
   // Normalize line endings
   clean = clean.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  // ── STRIP title LINES FROM C4/SEQUENCE/ER/CLASS/STATE DIAGRAMS ─────────────
+  // The `title` statement is only meaningful in gantt and timeline diagrams.
+  // In C4, sequence, er, class, state diagrams it is optional metadata, and
+  // the LLM frequently squashes it with the next statement (e.g.
+  // "title C4 Container Diagramdirection TDPerson(") causing hard lexer crashes.
+  // Strip all title lines from non-gantt/timeline diagrams to eliminate this
+  // entire class of crash permanently.
+  {
+    const firstMeaningfulForTitle = clean
+      .split("\n")
+      .find((l: string) => l.trim() && !l.trim().startsWith("%%"))
+      ?.trim()?.toLowerCase() || "";
+    const isTitleSafe =
+      firstMeaningfulForTitle.startsWith("gantt") ||
+      firstMeaningfulForTitle.startsWith("timeline");
+    if (!isTitleSafe) {
+      // Also handle squashed title lines like "title FooBardirection TD" or
+      // "title FooPerson(" — split them first, then strip the title part.
+      clean = clean
+        .split("\n")
+        .flatMap((line: string) => {
+          const t = line.trim();
+          if (!/^title\s/i.test(t)) return [line];
+          // Split at first statement keyword glued to the title text
+          const GLUE_RE = /(direction\s+(?:TD|LR|TB|BT|RL)|Person\s*\(|System\s*\(|Container\s*\(|Component\s*\(|Rel\s*\(|Boundary\s*\(|C4Context\b|C4Container\b|C4Component\b|flowchart\s|sequenceDiagram\b|erDiagram\b|classDiagram\b|subgraph\s)/i;
+          const m = t.match(GLUE_RE);
+          if (m && m.index && m.index > 0) {
+            // Discard title part, keep remainder as its own line
+            return [t.slice(m.index).trim()];
+          }
+          // Clean title line — just strip it
+          return [];
+        })
+        .join("\n");
+    }
+  }
+  // ── END STRIP title LINES ────────────────────────────────────────────────
 
   // ── NUCLEAR PRE-PASS: split ANY word squashed against Mermaid keywords ──
   // Catches "endclassDef", "transfer_fundsactor", "nodeIdsubgraph", etc.
@@ -1020,6 +1058,12 @@ function repairJson(raw: string): string {
   return s;
 }
 
+// Result type that carries both text and which provider served the request
+interface GenerateResult {
+  text: string;
+  provider: string; // e.g. "gemini-2.5-flash", "groq/llama-3.3-70b", "mistral-large-latest", "openrouter/gemini-2.0-flash"
+}
+
 // Zentrale generator routine with fallback
 async function generateWithFallback({
   systemInstruction,
@@ -1031,7 +1075,7 @@ async function generateWithFallback({
   contents: any;
   responseMimeType?: string;
   temperature?: number;
-}): Promise<string> {
+}): Promise<GenerateResult> {
   let geminiError: any = null;
 
   // Check if any LLM provider is configured
@@ -1047,11 +1091,25 @@ async function generateWithFallback({
     );
   }
 
-  // Helper: extract plain text from multimodal contents
+  // Helper: extract plain text from Gemini-style multimodal contents.
+  // Used when falling back to OpenAI-compat providers that don't support inlineData.
   const extractTextContents = (c: any): string => {
     if (typeof c === "string") return c;
-    if (Array.isArray(c)) return c.map((x: any) => x.text || JSON.stringify(x)).join("\n");
-    if (c?.parts && Array.isArray(c.parts)) return c.parts.map((p: any) => p.text || "").join("\n");
+    if (Array.isArray(c)) {
+      return c.map((x: any) => {
+        if (typeof x === "string") return x;
+        if (x.text) return x.text;
+        if (x.inlineData) return `[Attached ${x.inlineData.mimeType} file — not available in text fallback mode]`;
+        return JSON.stringify(x);
+      }).join("\n");
+    }
+    if (c?.parts && Array.isArray(c.parts)) {
+      return c.parts.map((p: any) => {
+        if (p.text) return p.text;
+        if (p.inlineData) return `[Attached ${p.inlineData.mimeType} file — not available in text fallback mode]`;
+        return "";
+      }).filter(Boolean).join("\n");
+    }
     return JSON.stringify(c);
   };
 
@@ -1060,14 +1118,18 @@ async function generateWithFallback({
     url: string,
     apiKey: string,
     model: string,
+    providerName: string,
     extraHeaders: Record<string, string> = {}
-  ): Promise<string> => {
+  ): Promise<GenerateResult> => {
     const textContents = extractTextContents(contents);
     const messages = [
       { role: "system", content: systemInstruction },
       { role: "user", content: textContents },
     ];
     const payload: any = { model, messages, temperature };
+    // Only request JSON mode when the provider is known to support it and we need JSON.
+    // Groq supports json_object for most models; Mistral and OpenRouter also support it.
+    // We wrap in try/catch below — if the provider rejects it we retry without it.
     if (responseMimeType === "application/json") {
       payload.response_format = { type: "json_object" };
     }
@@ -1082,12 +1144,36 @@ async function generateWithFallback({
     });
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`API ${url} returned HTTP ${response.status}: ${errorText}`);
+      // If JSON mode was requested and the error looks like an unsupported feature,
+      // retry without response_format (some older or free-tier models don't support it)
+      if (responseMimeType === "application/json" && (response.status === 400 || response.status === 422)) {
+        try {
+          const retryPayload = { ...payload };
+          delete retryPayload.response_format;
+          const retryResp = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+              ...extraHeaders,
+            },
+            body: JSON.stringify(retryPayload),
+          });
+          if (retryResp.ok) {
+            const retryData = await retryResp.json();
+            const retryText = retryData?.choices?.[0]?.message?.content;
+            if (retryText) return { text: retryText, provider: providerName };
+          }
+        } catch {
+          // retry failed — fall through to the throw below
+        }
+      }
+      throw new Error(`${providerName} returned HTTP ${response.status}: ${errorText.slice(0, 300)}`);
     }
     const data = await response.json();
     const text = data?.choices?.[0]?.message?.content;
-    if (text) return text;
-    throw new Error(`Empty response from ${url}`);
+    if (text) return { text, provider: providerName };
+    throw new Error(`Empty response from ${providerName}`);
   };
 
   // ── 1. Try Gemini first ───────────────────────────────────────────────────
@@ -1102,68 +1188,103 @@ async function generateWithFallback({
           responseMimeType: responseMimeType as any,
         },
       });
-      const text = response.text;
-      if (text) return text;
+      // response.text is a getter in @google/genai v2 — it can throw
+      // GoogleGenerativeAIResponseError synchronously if the response has
+      // safety blocks or empty candidates. Wrap in its own try/catch.
+      let text: string | undefined;
+      try {
+        text = response.text;
+      } catch (getterErr: any) {
+        throw new Error(`Gemini response.text getter threw: ${getterErr?.message || getterErr}`);
+      }
+      if (text && text.trim().length > 0) return { text, provider: DEFAULT_MODEL };
       throw new Error("Gemini returned an empty text response.");
     } catch (err: any) {
-      console.warn("Gemini failed, trying fallbacks...", err.message || err);
-      geminiError = err;
+      // Normalize error to a plain message — the SDK sometimes throws objects
+      // that aren't standard Error instances.
+      const msg = err?.message || err?.toString?.() || String(err);
+      console.warn(`[Fallback] Gemini failed (${msg}), trying Groq...`);
+      geminiError = new Error(msg);
     }
   } else if (!hasGeminiKey) {
+    console.log("[Fallback] GEMINI_API_KEY not configured, skipping to Groq.");
     geminiError = new Error("GEMINI_API_KEY not configured.");
+  } else {
+    // hasGeminiKey is true but ai is null (shouldn't happen, but be safe)
+    console.warn("[Fallback] Gemini client not initialized despite key being set, skipping.");
+    geminiError = new Error("Gemini client initialization failed.");
   }
 
   // ── 2. Try Groq ───────────────────────────────────────────────────────────
   if (hasGroqKey) {
-    console.log("Using Groq fallback (llama-3.3-70b-versatile)...");
+    const groqModel = "llama-3.3-70b-versatile";
+    console.log(`[Fallback] Trying Groq (${groqModel})...`);
     try {
-      return await callOpenAICompat(
+      const result = await callOpenAICompat(
         "https://api.groq.com/openai/v1/chat/completions",
         GROQ_API_KEY as string,
-        "llama-3.3-70b-versatile"
+        groqModel,
+        `groq/${groqModel}`
       );
+      console.log(`[Fallback] Groq succeeded.`);
+      return result;
     } catch (groqError: any) {
-      console.warn("Groq fallback failed, trying OpenRouter...", groqError.message || groqError);
+      console.warn(`[Fallback] Groq failed (${groqError?.message || groqError}), trying Mistral/OpenRouter...`);
     }
+  } else {
+    console.log("[Fallback] GROQ_API_KEY not configured, skipping.");
   }
 
   // ── 3. Try Mistral ───────────────────────────────────────────────────────
   if (hasMistralKey) {
-    console.log("Using Mistral fallback (mistral-large-latest)...");
+    const mistralModel = "mistral-large-latest";
+    console.log(`[Fallback] Trying Mistral (${mistralModel})...`);
     try {
-      return await callOpenAICompat(
+      const result = await callOpenAICompat(
         "https://api.mistral.ai/v1/chat/completions",
         MISTRAL_API_KEY as string,
-        "mistral-large-latest"
+        mistralModel,
+        `mistral/${mistralModel}`
       );
+      console.log(`[Fallback] Mistral succeeded.`);
+      return result;
     } catch (mistralError: any) {
-      console.warn("Mistral fallback failed, trying OpenRouter...", mistralError.message || mistralError);
+      console.warn(`[Fallback] Mistral failed (${mistralError?.message || mistralError}), trying OpenRouter...`);
     }
+  } else {
+    console.log("[Fallback] MISTRAL_API_KEY not configured, skipping.");
   }
 
   // ── 4. Try OpenRouter (final fallback) ────────────────────────────────────
   if (hasOpenRouterKey) {
-    console.log("Using OpenRouter final fallback (google/gemini-2.0-flash-exp:free)...");
+    const orModel = "google/gemini-2.0-flash-exp:free";
+    console.log(`[Fallback] Trying OpenRouter (${orModel})...`);
     try {
-      return await callOpenAICompat(
+      const result = await callOpenAICompat(
         "https://openrouter.ai/api/v1/chat/completions",
         OPENROUTER_API_KEY as string,
-        "google/gemini-2.0-flash-exp:free",
+        orModel,
+        `openrouter/${orModel}`,
         {
           "HTTP-Referer": process.env.APP_URL || "https://archprompt.app",
           "X-Title": "ArchPrompt",
         }
       );
+      console.log(`[Fallback] OpenRouter succeeded.`);
+      return result;
     } catch (openRouterErr: any) {
-      console.error("OpenRouter fallback also failed:", openRouterErr);
+      const msg = openRouterErr?.message || openRouterErr;
+      console.error(`[Fallback] OpenRouter also failed: ${msg}`);
       throw new Error(
-        `All LLM providers failed.\nGemini: ${geminiError?.message || geminiError}\nGroq: exhausted\nMistral: exhausted\nOpenRouter: ${openRouterErr.message || openRouterErr}`
+        `All LLM providers failed.\nGemini: ${geminiError?.message || geminiError}\nGroq: exhausted\nMistral: exhausted\nOpenRouter: ${msg}`
       );
     }
+  } else {
+    console.log("[Fallback] OPENROUTER_API_KEY not configured, skipping.");
   }
 
   // No remaining providers
-  throw new Error(`All configured LLM providers failed.\nGemini Error: ${geminiError?.message || geminiError}`);
+  throw new Error(`All configured LLM providers failed.\nGemini: ${geminiError?.message || geminiError}`);
 }
 
 function normalizeBlueprint(blueprint: any): any {
@@ -1262,44 +1383,64 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      const text = await generateWithFallback({
+      const result = await generateWithFallback({
         systemInstruction: PARSER_SYSTEM,
         contents: contentsPayload,
         responseMimeType: "application/json",
         temperature: 0.1,
       });
 
-      const cleanJson = sanitizeContent(text);
+      const cleanJson = sanitizeContent(result.text);
       let parsed: any;
       try {
         parsed = JSON.parse(repairJson(cleanJson));
       } catch (parseErr: any) {
         // Last resort: try the raw text in case sanitizeContent mangled it
         try {
-          parsed = JSON.parse(repairJson(text));
+          parsed = JSON.parse(repairJson(result.text));
         } catch {
           console.error("Stage 1: AI returned malformed JSON:", cleanJson.slice(0, 300));
           return NextResponse.json({ error: `AI returned malformed JSON. Try again. (${(parseErr as Error).message})` }, { status: 500 });
         }
       }
 
-      return NextResponse.json({ blueprint: normalizeBlueprint(parsed) });
+      return NextResponse.json({ blueprint: normalizeBlueprint(parsed), provider: result.provider });
 
     } else if (stage === 2) {
       if (!blueprint) {
         return NextResponse.json({ error: "Missing 'blueprint' parameter for Stage 2." }, { status: 400 });
       }
 
-      const systemPrompt = buildCompilerPrompt(blueprint.diagramKind || "flowchart", blueprint.direction || "TD");
+      const { errorContext } = body;
 
-      const text = await generateWithFallback({
+      let systemPrompt = buildCompilerPrompt(blueprint.diagramKind || "flowchart", blueprint.direction || "TD");
+
+      // 4E: If the caller provided a specific parse error from a failed render,
+      // append a targeted correction instruction so the model avoids the same mistake.
+      if (errorContext && typeof errorContext === "string" && errorContext.trim()) {
+        systemPrompt += `
+
+══════════════════════════════════════════════
+CRITICAL CORRECTION REQUIRED
+══════════════════════════════════════════════
+The previous generation attempt failed with this parse error:
+  "${errorContext.trim()}"
+You MUST produce corrected Mermaid code that avoids this specific error. Pay particular attention to:
+- Every statement on its own line, no exceptions.
+- \`direction\` keyword never attached to another token.
+- All node labels with spaces or special characters in double quotes.
+- classDef and class statements ONLY in flowchart diagrams, never in er/sequence/class/state/C4.
+- The \`end\` keyword alone on its own line with nothing before or after it.`;
+      }
+
+      const result = await generateWithFallback({
         systemInstruction: systemPrompt,
         contents: JSON.stringify(blueprint),
         temperature: 0.1,
       });
 
-      const cleanMermaid = sanitizeContent(text);
-      return NextResponse.json({ code: cleanMermaid });
+      const cleanMermaid = sanitizeContent(result.text);
+      return NextResponse.json({ code: cleanMermaid, provider: result.provider });
 
     } else if (stage === 3) {
       if (!blueprint) {
@@ -1311,6 +1452,7 @@ export async function POST(req: NextRequest) {
       let attempt = 0;
       let drawioXML = "";
       let errorMsg = "";
+      let usedProvider = "";
 
       while (attempt < 2) {
         try {
@@ -1318,13 +1460,14 @@ export async function POST(req: NextRequest) {
             ? JSON.stringify(blueprint)
             : `The previous XML was invalid or contained errors: ${errorMsg}. Please fix all XML formatting mistakes, make sure there are NO missing tags, escape all style variables properly, and supply a absolute complete valid mxfile XML document for Blueprint: ${JSON.stringify(blueprint)}`;
 
-          const text = await generateWithFallback({
+          const result = await generateWithFallback({
             systemInstruction: systemPrompt,
             contents: contents,
             temperature: 0.1,
           });
 
-          drawioXML = sanitizeContent(text);
+          drawioXML = sanitizeContent(result.text);
+          usedProvider = result.provider;
 
           // Basic check on server side. The full DOMParser review will run on client,
           // but we do a quick check here to reject obviously broken ones immediately.
@@ -1343,7 +1486,7 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      return NextResponse.json({ xml: drawioXML });
+      return NextResponse.json({ xml: drawioXML, provider: usedProvider });
 
     } else if (stage === 4) {
       const currentBlueprint = blueprint;
@@ -1377,28 +1520,28 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      const text = await generateWithFallback({
+      const result = await generateWithFallback({
         systemInstruction: REFINER_SYSTEM,
         contents: contentsPayload,
         responseMimeType: "application/json",
         temperature: 0.1,
       });
 
-      const cleanJson = sanitizeContent(text);
+      const cleanJson = sanitizeContent(result.text);
       let parsed: any;
       try {
         parsed = JSON.parse(repairJson(cleanJson));
       } catch (parseErr: any) {
         // Last resort: try the raw text in case sanitizeContent mangled it
         try {
-          parsed = JSON.parse(repairJson(text));
+          parsed = JSON.parse(repairJson(result.text));
         } catch {
           console.error("Stage 4: AI returned malformed JSON:", cleanJson.slice(0, 300));
           return NextResponse.json({ error: `AI returned malformed JSON. Try again. (${(parseErr as Error).message})` }, { status: 500 });
         }
       }
 
-      return NextResponse.json({ blueprint: normalizeBlueprint(parsed) });
+      return NextResponse.json({ blueprint: normalizeBlueprint(parsed), provider: result.provider });
 
     } else {
       return NextResponse.json({ error: "Invalid 'stage' value." }, { status: 400 });

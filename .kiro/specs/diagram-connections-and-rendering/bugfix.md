@@ -86,6 +86,50 @@ Three interconnected bugs in ArchPrompt cause diagrams to render with disconnect
 
 ---
 
+**Bug 4 — Mermaid sanitizer fallback: speculative regex transforms corrupt valid code and exhaust repair passes**
+
+1.10 WHEN the sanitizer chain (`sanitizeMermaidCode` → `applyPatterns` → `applyFinalPasses`) applies the nuclear keyword split to a `classDef` line that contains a Mermaid keyword as part of a class name (e.g. `classDef actor fill:...`), THEN the system splits the line into `classDef\nactor fill:...`, producing an orphaned CSS fragment that the renderer cannot parse, which consumes a repair pass without making progress toward a valid diagram.
+
+1.11 WHEN the sanitizer chain applies the nuclear keyword split to a flowchart node label that contains a Mermaid keyword (e.g. a node labelled `"🚀 Actor Service"` or `"📋 Section Overview"`), THEN the system splits the node definition mid-label, corrupting the node syntax and causing the renderer to fail on input that was structurally valid before sanitization.
+
+1.12 WHEN the direction-inside-subgraph strip pass (`insideSubgraph > 0 && /^direction\s+...$/`) processes Mermaid code that uses `direction TD` as a standalone top-level statement (not inside any subgraph), THEN the system may erroneously count subgraph depth and strip the `direction` line, removing a valid structural declaration and causing the diagram type header to have no direction value.
+
+1.13 WHEN all client-side repair passes (primary `sanitizeMermaidCode`, secondary `applyPatterns`, repair attempt via `applyFinalPasses(applyPatterns(...))`) are exhausted and `m.render` still throws, THEN the system renders a single-node placeholder diagram (`flowchart TD\n  note["⚠️ Diagram syntax issue..."]`) and sets `canvasError` to `"Diagram had a syntax issue and was regenerated in fallback mode. Try regenerating for the full diagram."`, giving the user an error banner with no actual diagram content and no server-side recovery attempt.
+
+1.14 WHEN the fallback path is reached because client-side sanitization produced corrupt Mermaid code (due to over-aggressive regex transforms in 1.10–1.12), THEN the system makes no further attempt to recover the original generated Mermaid code from the server, even though the original raw code from Stage 2 (before client-side mutations) may have been valid or close to valid and recoverable via a targeted server-side re-generation call with the specific parse error provided as context.
+
+---
+
+### Expected Behavior (Correct)
+
+**Fix 4 — Surgical sanitizer and server-side re-generation fallback**
+
+2.11 WHEN the sanitizer chain encounters a `classDef` line, THEN the system SHALL hoist that line out of scope before running any nuclear keyword split passes, process all other lines through the split passes, and re-append the `classDef` line after splits complete, so that class names containing Mermaid keywords (e.g. `actor`, `service`, `class`) are never split mid-line.
+
+2.12 WHEN the nuclear keyword split pass runs, THEN the system SHALL skip any line whose trimmed content is entirely within a quoted string context (i.e., the keyword appears only inside double-quoted label text and not in the structural token position), so that node labels containing words like `"actor"`, `"section"`, or `"end"` are not corrupted by word-boundary splits.
+
+2.13 WHEN the direction-inside-subgraph strip pass runs, THEN the system SHALL only strip `direction` lines whose preceding `subgraph` was opened and whose matching `end` has not yet been seen (strict depth tracking), ensuring that `direction` lines at depth 0 (top-level scope, outside any subgraph) are never stripped.
+
+2.14 WHEN all client-side repair passes are exhausted and `m.render` still fails, THEN the system SHALL make a Stage 2 re-call to the `/api/generate` endpoint with `stage: 2`, passing: (a) the original Blueprint JSON unchanged, (b) the specific parse error message from the final `m.render` failure, and (c) an instruction to produce corrected Mermaid code avoiding the specific error pattern — before falling back to the placeholder diagram.
+
+2.15 WHEN the server-side Stage 2 re-call in 2.14 returns corrected Mermaid code, THEN the system SHALL attempt `m.render` on the corrected code one final time; if that render succeeds, the system SHALL update `mermaidCode` state and `canvasError` SHALL remain `null` (no error banner shown); if that render also fails, only then SHALL the system render the placeholder diagram and set `canvasError`.
+
+---
+
+### Unchanged Behavior (Regression Prevention)
+
+3.9 WHEN Mermaid code passes the primary `sanitizeMermaidCode` pass without errors and renders successfully on the first `m.render` attempt, THEN the system SHALL CONTINUE TO render that diagram immediately without triggering any repair pass or server re-call.
+
+3.10 WHEN the auto-repair path (first `applyFinalPasses(applyPatterns(...))`) successfully fixes a syntax issue and `m.render` succeeds on the repaired code, THEN the system SHALL CONTINUE TO use the repaired code and return the SVG without triggering the server-side re-call.
+
+3.11 WHEN a `classDef` line appears in a non-flowchart diagram type, THEN the system SHALL CONTINUE TO strip that line entirely (existing behavior) rather than hoisting it, since `classDef` is only valid in flowchart diagrams.
+
+3.12 WHEN the Stage 2 re-call for Mermaid code generation is made, THEN the system SHALL CONTINUE TO use the same model and endpoint (`/api/generate` with `stage: 2`) used by the main pipeline, and SHALL NOT alter the Blueprint JSON structure or the diagram kind during the re-call.
+
+3.13 WHEN `canvasError` is set to the fallback message, THEN the system SHALL CONTINUE TO display the error banner with the "Try regenerating" prompt so the user always has a manual escape hatch.
+
+---
+
 ## Bug Condition Pseudocode
 
 ### Bug 1 — Edge Absence in Blueprint JSON
@@ -164,5 +208,60 @@ END FOR
 // Property: Preservation Checking
 FOR ALL blueprint WHERE blueprint.edges IS WELL_FORMED DO
   ASSERT compileEaDiagram(blueprint).edgeCount = compileEaDiagram'(blueprint).edgeCount
+END FOR
+```
+
+### Bug 4 — Sanitizer Corruption and Fallback Exhaustion
+
+```pascal
+FUNCTION isBugCondition_Bug4(mermaidCode)
+  INPUT: mermaidCode of type string
+  OUTPUT: boolean
+
+  // Bug condition: sanitizer chain produces corrupt code from valid-or-repairable input
+  // AND no server-side recovery is attempted when all client passes exhaust
+
+  sanitized ← sanitizeMermaidCode(mermaidCode)
+  repaired  ← applyFinalPasses(applyPatterns(sanitized))
+
+  // Case A: nuclear split corrupted a classDef line or a node label
+  containsClassDefSplit ← sanitized CONTAINS orphaned CSS fragment (e.g. "actor fill:")
+  containsNodeLabelSplit ← sanitized CONTAINS split node definition mid-label
+
+  // Case B: direction strip removed a top-level direction declaration
+  topLevelDirectionStripped ← mermaidCode CONTAINS top_level_direction_declaration
+                              AND sanitized DOES NOT CONTAIN that declaration
+
+  // Case C: all passes exhausted and m.render still fails with no server re-call
+  allPassesFailed ← NOT m.render_succeeds(repaired)
+  noServerRecall  ← server_recall_attempted = false
+
+  RETURN (containsClassDefSplit OR containsNodeLabelSplit OR topLevelDirectionStripped)
+         OR (allPassesFailed AND noServerRecall)
+END FUNCTION
+
+// Property: Fix Checking — sanitizer must not corrupt valid constructs
+FOR ALL mermaidCode WHERE isBugCondition_Bug4(mermaidCode) DO
+  result ← sanitizeMermaidCode'(mermaidCode)
+  ASSERT classDef_lines_intact(result)
+  ASSERT node_labels_intact(result)
+  ASSERT top_level_direction_preserved(result)
+END FOR
+
+// Property: Fix Checking — server re-call must be attempted before fallback
+FOR ALL mermaidCode WHERE allClientPassesFailed(mermaidCode) DO
+  outcome ← renderMermaidMarkup'(mermaidCode)
+  ASSERT server_recall_was_attempted(outcome) = true
+  // Only show placeholder if server re-call also fails
+  IF server_recall_also_failed(outcome) THEN
+    ASSERT canvasError_set_to_fallback_message(outcome) = true
+  ELSE
+    ASSERT canvasError = null AND svg_rendered(outcome) = true
+  END IF
+END FOR
+
+// Property: Preservation Checking
+FOR ALL mermaidCode WHERE NOT isBugCondition_Bug4(mermaidCode) DO
+  ASSERT renderMermaidMarkup(mermaidCode) = renderMermaidMarkup'(mermaidCode)
 END FOR
 ```
