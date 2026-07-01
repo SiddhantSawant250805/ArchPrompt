@@ -2346,8 +2346,8 @@ export default function Home() {
     drawioXmlRef.current = drawioXml;
     loadDrawioXml(drawioXml);
 
-    // Navigate to the draw.io editor so the user sees their diagram immediately
-    setActiveTab("drawio");
+    // Show the canvas first; user can switch to Draw.io Editor when ready
+    setActiveTab("diagram");
     triggerToast(`Loaded diagram: ${app.name} ✓`, false);
   };
 
