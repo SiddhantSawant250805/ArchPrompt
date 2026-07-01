@@ -1707,6 +1707,14 @@ export default function Home() {
     // Ensure `direction TD/LR/...` is isolated on its own line
     clean = clean.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n])/gi, "$1\n$2");
 
+    // Strip orphaned classDef class-name+CSS lines produced by the actor/service/etc.
+    // keyword splits above. When "classDef actor fill:..." is split by ([^\n])(actor\s),
+    // "actor fill:#0c1524,..." ends up as a standalone invalid line. Strip it.
+    clean = clean.replace(
+      /^[ \t]*(?:actor|service|database|external|ui|queue|gateway|process|usecase|decision|milestone)\s+(?:fill|stroke|color|font)[^;\n]*/gm,
+      ""
+    );
+
     // ── END STEP 0 ───────────────────────────────────────────────────────────
 
     // ── Legacy segment-aware passes (belt-and-suspenders) ────────────────────
@@ -2012,6 +2020,13 @@ export default function Home() {
       }
       s = s.replace(/(direction\s+(?:TD|LR|TB|BT|RL))\s*([^\n])/gi, (m, a, b) => a + "\n" + b);
       s = s.replace(/([^\n])\b(end)\b(\s*\n)/gi, (m, a, b, c) => a + "\nend\n");
+      // Strip orphaned classDef class-name+CSS lines produced when the keyword
+      // split patterns above split "classDef actor fill:..." into two lines.
+      // "actor fill:#0c1524,stroke:..." is an invalid standalone statement.
+      s = s.replace(
+        /^[ \t]*(?:actor|service|database|external|ui|queue|gateway|process|usecase|decision|milestone)\s+(?:fill|stroke|color|font)[^;\n]*/gm,
+        ""
+      );
       // ── NUCLEAR DIRECTION PASS (last resort before m.render) ─────────────────
       // Forcibly isolates any `direction TD/LR/...` still sandwiched on a line.
       s = s.replace(
@@ -2095,6 +2110,12 @@ export default function Home() {
       }
 
       // Stage 6: strip quoted pipe labels + split squashed edge targets
+      // Also strip orphaned classDef class-name+CSS lines that Stage 5 may produce
+      // by splitting "classDef actor fill:..." into "classDef\nactor fill:...".
+      s = s.replace(
+        /^[ \t]*(?:actor|service|database|external|ui|queue|gateway|process|usecase|decision|milestone)\s+(?:fill|stroke|color|font)[^;\n]*/gm,
+        ""
+      );
       s = s.replace(/\|"([^"]+)"\|/g, "|$1|");
       s = s.replace(
         /((?:-->|-.->|-->>?|===>?|~~~)\s*\|[^|]*\|\s*)([a-zA-Z_][a-zA-Z0-9_]*)([a-zA-Z_][a-zA-Z0-9_]*(?:\s*[\[({]))/g,
