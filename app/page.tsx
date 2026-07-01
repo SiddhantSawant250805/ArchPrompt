@@ -2311,38 +2311,43 @@ export default function Home() {
     setActiveApplicationId(app.id);
     setLastBlueprint(app.blueprint);
     setMermaidCode(app.mermaidCode);
-    setDrawioXML(app.drawioXML);
     setCanvasError(null);
     setDrawioError(null);
     setPromptInput("");
 
+    // Render mermaid first so we always have an SVG fallback
     const renderedSvg = await renderMermaidMarkup(app.mermaidCode);
 
-    let drawioXml = app.drawioXML;
-    if (!drawioXml && app.mermaidCode) {
+    let drawioXml = app.drawioXML || null;
+
+    if (!drawioXml) {
+      // Diagram was saved before draw.io XML was compiled — generate it now
       try {
         if (app.blueprint) {
           drawioXml = compileBlueprintToDrawio(app.blueprint, renderedSvg || undefined, resolvedLogos);
-        } else if (renderedSvg) {
-          drawioXml = compileSvgToDrawioXml(renderedSvg);
         }
       } catch (err) {
-        console.warn("Failed local blueprint compile on load, falling back to visual SVG compile", err);
-        if (renderedSvg) {
-          drawioXml = compileSvgToDrawioXml(renderedSvg);
-        }
+        console.warn("[handleLoadApplication] Blueprint compile failed, falling back to SVG compile", err);
       }
-
+      if (!drawioXml && renderedSvg) {
+        drawioXml = compileSvgToDrawioXml(renderedSvg);
+      }
       if (drawioXml) {
-        setDrawioXML(drawioXml);
+        // Persist the compiled XML so subsequent loads are instant
         const updatedApp = { ...app, drawioXML: drawioXml };
         saveApplication(updatedApp);
         refreshApplications(activeProjectId || app.projectId || "");
       }
     }
 
+    // Sync state and ref before calling loadDrawioXml so the iframe init
+    // event always sees the latest XML even if it fires after a tab switch
+    setDrawioXML(drawioXml);
+    drawioXmlRef.current = drawioXml;
     loadDrawioXml(drawioXml);
-    setActiveTab("diagram");
+
+    // Navigate to the draw.io editor so the user sees their diagram immediately
+    setActiveTab("drawio");
     triggerToast(`Loaded diagram: ${app.name} ✓`, false);
   };
 
